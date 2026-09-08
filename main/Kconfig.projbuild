@@ -1,0 +1,34 @@
+menu "FMO Live Monitor"
+
+config FMO_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        The 2.4 GHz Wi-Fi network used by AI Passport. Keep the tracked default
+        empty and configure the real value in the untracked sdkconfig file.
+
+config FMO_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        Password for the selected Wi-Fi network. Open networks may leave this
+        empty. Never commit a populated sdkconfig file.
+
+config FMO_HOST
+    string "FMO host name or IPv4 address"
+    default ""
+    help
+        LAN address of the FMO device, without ws://, a port, or a path. An IPv4
+        address is recommended when the local network does not resolve .local.
+
+config FMO_PORT
+    int "FMO web interface port"
+    range 1 65535
+    default 80
+
+config FMO_BACKLIGHT
+    int "Initial display brightness percent"
+    range 20 100
+    default 80
+
+endmenu
