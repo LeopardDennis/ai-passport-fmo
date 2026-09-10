@@ -39,12 +39,15 @@ static QueueHandle_t s_fmo_queue;
 static QueueHandle_t s_input_queue;
 static fmo_monitor_state_t s_state;
 static char s_error[48];
+static char s_setup_ssid[33];
+static char s_setup_password[17];
 static int s_battery_soc = -1;
 static int s_brightness = CONFIG_FMO_BACKLIGHT;
 
 static lv_obj_t *s_link_label;
 static lv_obj_t *s_battery_label;
 static lv_obj_t *s_channel_label;
+static lv_obj_t *s_caption_label;
 static lv_obj_t *s_air_label;
 static lv_obj_t *s_callsign_label;
 static lv_obj_t *s_detail_label;
@@ -71,6 +74,7 @@ static uint64_t monotonic_ms(void)
 
 static void render_link(void)
 {
+    if (s_setup_ssid[0]) {label_text(s_link_label, "PHONE WIFI SETUP"); return;}
     const char *text;
     uint32_t color;
     if (s_error[0] != '\0') {
@@ -95,6 +99,8 @@ static void render_link(void)
 
 static void render_channel(void)
 {
+    label_text(s_caption_label, s_setup_ssid[0] ? "JOIN THIS HOTSPOT" : "CHANNEL");
+    if (s_setup_ssid[0]) {label_text(s_channel_label, s_setup_ssid); return;}
     char text[64];
     if (!s_state.channel_valid) {
         snprintf(text, sizeof(text), "--");
@@ -110,6 +116,12 @@ static void render_channel(void)
 
 static void render_speaker(uint64_t now_ms)
 {
+    if (s_setup_ssid[0]) {
+        label_text(s_air_label, "HOTSPOT PASSWORD");
+        label_text(s_callsign_label, s_setup_password);
+        label_text(s_detail_label, "192.168.4.1");
+        return;
+    }
     char detail[64];
     if (!s_state.channel_valid || !s_state.events_connected) {
         label_text(s_air_label, "WAITING FOR SYNC");
@@ -191,6 +203,8 @@ static void ui_tick(lv_timer_t *timer)
     fmo_snapshot_t snapshot;
     if (xQueueReceive(s_fmo_queue, &snapshot, 0) == pdTRUE) {
         s_state = snapshot.state;
+        snprintf(s_setup_ssid, sizeof(s_setup_ssid), "%s", snapshot.setup_ssid);
+        snprintf(s_setup_password, sizeof(s_setup_password), "%s", snapshot.setup_password);
         snprintf(s_error, sizeof(s_error), "%s", snapshot.error);
         dirty = true;
     }
@@ -239,6 +253,7 @@ static void build_ui(void)
 
     lv_obj_t *caption = create_centered_label(panel, "CHANNEL",
                                                &lv_font_montserrat_14, 25);
+    s_caption_label = caption;
     lv_obj_set_style_text_color(caption, lv_color_hex(UI_SKY_DARK), 0);
     s_channel_label = create_centered_label(panel, "--",
                                              &lv_font_montserrat_20, 44);
@@ -266,6 +281,10 @@ static void build_ui(void)
 static void button_event(bsp_btn_t button, bsp_btn_ev_t event, void *user)
 {
     (void)user;
+    if (button == BSP_BTN_OK && event == BSP_BTN_LONG) {
+        fmo_network_request_setup();
+        return;
+    }
     if (event != BSP_BTN_CLICK || !s_input_queue) return;
     app_input_t input = { .type = APP_INPUT_BUTTON, .value = button };
     xQueueSend(s_input_queue, &input, 0);

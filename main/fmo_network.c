@@ -1,4 +1,7 @@
 #include "fmo_network.h"
+#include "fmo_provision.h"
+#include "esp_system.h"
+#include <stdatomic.h>
 
 #include "demo_radio.h"
 #include "fmo_ws_rx.h"
@@ -19,6 +22,9 @@
 #include <string.h>
 
 static const char *TAG = "fmo_network";
+static atomic_bool s_reconnect;
+static atomic_bool s_setup_requested;
+static atomic_bool s_setup_active;
 
 #define WIFI_READY_BIT BIT0
 #define FMO_CHANNEL_REFRESH_MS 1000
@@ -330,15 +336,25 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)arg;
     (void)data;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        if (atomic_load(&s_reconnect)) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_wifi_bits, WIFI_READY_BIT);
+        xEventGroupSetBits(s_wifi_bits, WIFI_READY_BIT << 1);
         post_link(FMO_UPDATE_WIFI, false);
-        esp_wifi_connect();
+        if (atomic_load(&s_reconnect)) esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         xEventGroupSetBits(s_wifi_bits, WIFI_READY_BIT);
         post_link(FMO_UPDATE_WIFI, true);
     }
+}
+
+static void setup_display(const char *ssid, const char *password)
+{
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    snprintf(s_snapshot.setup_ssid, sizeof(s_snapshot.setup_ssid), "%s", ssid);
+    snprintf(s_snapshot.setup_password, sizeof(s_snapshot.setup_password), "%s", password);
+    xQueueOverwrite(s_update_queue, &s_snapshot);
+    xSemaphoreGive(s_state_lock);
 }
 
 static esp_err_t start_wifi(void)
@@ -368,24 +384,40 @@ static esp_err_t start_wifi(void)
     snprintf((char *)wifi_config.sta.password, sizeof(wifi_config.sta.password), "%s",
              CONFIG_FMO_WIFI_PASSWORD);
     wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    bool force = false;
+    bool saved = fmo_provision_load(&wifi_config, &force);
+    wifi_config.sta.threshold.authmode = wifi_config.sta.password[0]
+        ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    bool setup = force || (!saved && CONFIG_FMO_WIFI_SSID[0] == '\0');
+    atomic_store(&s_reconnect, !setup);
 
     err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
     if (err == ESP_OK) err = esp_wifi_set_mode(WIFI_MODE_STA);
     if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     if (err == ESP_OK) err = esp_wifi_start();
+    if (err == ESP_OK && setup) {
+        atomic_store(&s_setup_active, true);
+        atomic_store(&s_setup_requested, false);
+        err = fmo_provision_run(s_wifi_bits, WIFI_READY_BIT, setup_display);
+        atomic_store(&s_setup_active, false);
+        setup_display("", "");
+        atomic_store(&s_reconnect, true);
+        if (err == ESP_OK && !(xEventGroupGetBits(s_wifi_bits) & WIFI_READY_BIT)) esp_wifi_connect();
+    }
     return err;
+}
+
+static void check_setup_request(void)
+{
+    if (atomic_exchange(&s_setup_requested, false)) {
+        if (fmo_provision_force() == ESP_OK) esp_restart();
+        else post_error("SETUP SAVE FAILED");
+    }
 }
 
 static void network_task(void *argument)
 {
     (void)argument;
-    if (CONFIG_FMO_WIFI_SSID[0] == '\0' || CONFIG_FMO_HOST[0] == '\0') {
-        post_error("SET WIFI + FMO HOST");
-        s_network_task = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
     esp_err_t err = start_wifi();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Wi-Fi start failed: %s", esp_err_to_name(err));
@@ -395,14 +427,15 @@ static void network_task(void *argument)
         return;
     }
 
-    xEventGroupWaitBits(s_wifi_bits, WIFI_READY_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+    while (!(xEventGroupWaitBits(s_wifi_bits, WIFI_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(1000)) & WIFI_READY_BIT))
+        check_setup_request();
 
     char events_uri[160];
     char control_uri[160];
     int events_length = snprintf(events_uri, sizeof(events_uri), "ws://%s:%d/events",
-                                 CONFIG_FMO_HOST, CONFIG_FMO_PORT);
+                                 CONFIG_FMO_HOST[0] ? CONFIG_FMO_HOST : "fmo.local", CONFIG_FMO_PORT);
     int control_length = snprintf(control_uri, sizeof(control_uri), "ws://%s:%d/ws",
-                                  CONFIG_FMO_HOST, CONFIG_FMO_PORT);
+                                  CONFIG_FMO_HOST[0] ? CONFIG_FMO_HOST : "fmo.local", CONFIG_FMO_PORT);
     if (events_length < 0 || events_length >= (int)sizeof(events_uri) ||
         control_length < 0 || control_length >= (int)sizeof(control_uri)) {
         post_error("FMO HOST TOO LONG");
@@ -413,6 +446,7 @@ static void network_task(void *argument)
 
     unsigned diagnostics_tick = 0;
     for (;;) {
+        check_setup_request();
         if (xEventGroupGetBits(s_wifi_bits) & WIFI_READY_BIT) {
             if (!s_events_socket.client) {
                 err = start_socket(&s_events_socket, events_uri);
@@ -470,5 +504,12 @@ esp_err_t fmo_network_start(QueueHandle_t update_queue)
 
 void fmo_network_request_refresh(void)
 {
+    if (s_network_task) xTaskNotifyGive(s_network_task);
+}
+
+void fmo_network_request_setup(void)
+{
+    if (atomic_load(&s_setup_active)) return;
+    atomic_store(&s_setup_requested, true);
     if (s_network_task) xTaskNotifyGive(s_network_task);
 }

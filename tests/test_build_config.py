@@ -16,7 +16,7 @@ SPEC.loader.exec_module(CHECK)
 class BuildConfigTests(unittest.TestCase):
     def test_packaging_config_isolation(self):
         # Stop at the first build call: verify its config input without IDF.
-        for mode in ("--configured", "--firmware"):
+        for mode in ("--configured", "--firmware", "--setup"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 (root / "tools").mkdir()
@@ -42,9 +42,12 @@ class BuildConfigTests(unittest.TestCase):
                 if mode == "--configured":
                     self.assertEqual(recorded["config"], configuration)
                     self.assertNotIn("sdkconfig.network", recorded["defaults"])
-                else:
+                elif mode == "--firmware":
                     self.assertIsNone(recorded["config"])
                     self.assertIn("sdkconfig.network", recorded["defaults"])
+                else:
+                    self.assertIsNone(recorded["config"])
+                    self.assertNotIn("sdkconfig.network", recorded["defaults"])
 
     def check_config(self, ssid, host):
         import json

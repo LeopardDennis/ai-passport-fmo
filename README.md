@@ -24,24 +24,30 @@ it does not act as a virtual FMO radio or connect directly to an FMO MQTT server
 
 ## Configure
 
-Use ESP-IDF 5.5.3 and configure the private values in the ignored `sdkconfig`
-file:
+On first boot, a credential-free build starts a protected hotspot. Join the
+`FMO-Setup-XXXX` network using the random password shown on the Passport screen.
+Keep the phone connected even if it reports no Internet, then open
+`http://192.168.4.1` manually. Choose a nearby 2.4 GHz Wi-Fi network or type a
+hidden SSID, enter its password, and submit. The list is scanned once per setup
+session. A failed connection can be retried without rebooting.
 
-```bash
-idf.py menuconfig
-```
+The firmware verifies Wi-Fi/DHCP for up to 25 seconds before saving credentials
+in its own `fmo_wifi` NVS namespace. It does not deliberately delete the previous
+credentials on failure. On success, the hotspot and HTTP server shut down and
+the monitor connects to `fmo.local:80` using mDNS resolution. Keep both devices on
+a LAN that allows multicast and communication between clients.
 
-Open **FMO Live Monitor** and set:
+Long-press **OK** during normal operation to reboot into setup; this also works
+when the saved router is unavailable. Existing credentials remain until a new
+connection succeeds. During setup, long-press OK is ignored. Power-cycle to retry
+a setup startup failure. There is no automatic captive-portal popup or assumption
+of shared credentials with other Passport firmware. The setup page is reachable
+only through the setup AP, uses a per-session token, and never returns the saved
+Wi-Fi password. Credentials are stored in ordinary NVS, not encrypted storage.
 
-- the 2.4 GHz Wi-Fi SSID and password;
-- the FMO host name or IPv4 address, without `ws://`, port, or path;
-- the FMO web-interface port, normally `80`;
-- initial display brightness.
-
-An IPv4 address is recommended if the local network does not resolve
-`fmo.local`. The tracked defaults intentionally contain no credentials. With no
-SSID or FMO host configured, the screen displays `SET WIFI + FMO HOST` and does
-not start the radio stack.
+Advanced users can still set build-time Wi-Fi fallback, FMO host/port and
+brightness via `idf.py menuconfig` → **FMO Live Monitor**. Saved settings take
+priority over build-time Wi-Fi values. Do not distribute builds with credentials.
 
 ## Build and install
 
@@ -49,7 +55,7 @@ Activate ESP-IDF 5.5.3, then run:
 
 ```bash
 ./tools/validate.sh --static
-./tools/validate.sh --configured
+./tools/validate.sh --setup
 ```
 
 The installable merged image is
@@ -62,6 +68,7 @@ device; never erase the full flash of a provisioned device.
 - **UP**: increase backlight brightness by 10%.
 - **DOWN**: decrease backlight brightness by 10%.
 - **OK**: refresh the current FMO channel immediately.
+- **Long OK**: restart into Wi-Fi setup without deleting existing credentials.
 
 ## FMO compatibility
 
@@ -110,7 +117,10 @@ private keys, or unsanitized logs.
 `./tools/validate.sh` runs host checks and a **network-enabled validation build**
 using public dummy settings in `tests/sdkconfig.network`. Its image goes to
 `build/validation/FoloToy-AI-Passport-full.bin`; it is not an installation image.
-The validation build cannot overwrite your configured installation image.
+The validation build cannot overwrite your installation image.
+For a shareable, credential-free setup image, run `./tools/validate.sh --setup`.
+It uses tracked defaults only, ignores private `sdkconfig`, and writes
+`build/FoloToy-AI-Passport-full.bin` for phone provisioning after installation.
 Use `idf.py menuconfig`, then `./tools/validate.sh --configured` for your device.
 That command copies your local configuration into a private temporary file,
 validates it, and emits `build/FoloToy-AI-Passport-full.bin`. The image contains

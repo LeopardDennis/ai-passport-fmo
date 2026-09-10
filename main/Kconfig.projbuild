@@ -16,7 +16,7 @@ config FMO_WIFI_PASSWORD
 
 config FMO_HOST
     string "FMO host name or IPv4 address"
-    default ""
+    default "fmo.local"
     help
         LAN address of the FMO device, without ws://, a port, or a path. An IPv4
         address is recommended when the local network does not resolve .local.

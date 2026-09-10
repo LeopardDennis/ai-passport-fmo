@@ -5,7 +5,7 @@ mode="${1:---all}"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-    echo "Usage: $0 [--all|--static|--firmware|--configured]" >&2
+    echo "Usage: $0 [--all|--static|--firmware|--configured|--setup]" >&2
 }
 
 run_static_checks() {
@@ -36,6 +36,9 @@ run_static_checks() {
         tests/test_fmo_ws_rx.c main/fmo_ws_rx.c -o "${test_dir}/test_fmo_ws_rx"
     "${test_dir}/test_fmo_ws_rx"
     python3 tests/test_build_config.py
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_fmo_credentials.c main/fmo_credentials.c -o "${test_dir}/test_fmo_credentials"
+    "${test_dir}/test_fmo_credentials"
     python3 tests/test_verify_firmware.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
@@ -60,6 +63,10 @@ run_firmware_checks() (
         config_defaults="${repo_root}/sdkconfig.defaults"
         output_dir="${repo_root}/build"
     fi
+    if [[ "${mode}" == "--setup" ]]; then
+        config_defaults="${repo_root}/sdkconfig.defaults"
+        output_dir="${repo_root}/build"
+    fi
 
     SDKCONFIG_DEFAULTS="${config_defaults}" \
         idf.py -B "${validation_build_dir}" \
@@ -72,7 +79,7 @@ run_firmware_checks() (
         "${validation_build_dir}/FoloToy-AI-Passport-full.bin" \
         "${output_dir}/FoloToy-AI-Passport-full.bin"
     echo "Firmware build: PASS"
-    if [[ "${mode}" != "--configured" ]]; then
+    if [[ "${mode}" != "--configured" && "${mode}" != "--setup" ]]; then
         echo "Validation image uses dummy network settings; use --configured for your device."
     fi
 )
@@ -86,7 +93,7 @@ case "${mode}" in
     --static)
         run_static_checks
         ;;
-    --firmware|--configured)
+    --firmware|--configured|--setup)
         run_firmware_checks
         ;;
     *)

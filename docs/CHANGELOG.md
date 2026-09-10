@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+- Add password-protected phone Wi-Fi setup, nearby SSID selection, verified NVS
+  persistence, long-OK reconfiguration, default fmo.local mDNS resolution, and
+  credential-free installation builds via `./tools/validate.sh --setup`.
+
 - Fix configured firmware packaging; separate dummy network validation artifacts.
 - Recover clean WebSocket closes and failed client creation; publish complete state
   snapshots, invalidate stale channels, and clear callsigns after channel changes.

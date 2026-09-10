@@ -31,6 +31,8 @@ typedef struct {
 typedef struct {
     fmo_monitor_state_t state;
     char error[48];
+    char setup_ssid[33];
+    char setup_password[17];
 } fmo_snapshot_t;
 
 /* Starts the lifetime-owned worker. Queue must hold ONE fmo_snapshot_t. */
@@ -38,3 +40,4 @@ esp_err_t fmo_network_start(QueueHandle_t update_queue);
 
 /* Non-blocking hint from the UI to query the current FMO channel again. */
 void fmo_network_request_refresh(void);
+void fmo_network_request_setup(void);
