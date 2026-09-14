@@ -2,6 +2,8 @@
 #include "fmo_provision.h"
 #include "esp_system.h"
 #include <stdatomic.h>
+#include "lwip/dns.h"
+#include "lwip/tcpip.h"
 
 #include "demo_radio.h"
 #include "fmo_ws_rx.h"
@@ -341,7 +343,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         xEventGroupClearBits(s_wifi_bits, WIFI_READY_BIT);
         xEventGroupSetBits(s_wifi_bits, WIFI_READY_BIT << 1);
         post_link(FMO_UPDATE_WIFI, false);
-        if (atomic_load(&s_reconnect)) esp_wifi_connect();
+        /* The network worker owns retries and profile switching. */
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         xEventGroupSetBits(s_wifi_bits, WIFI_READY_BIT);
         post_link(FMO_UPDATE_WIFI, true);
@@ -415,6 +417,51 @@ static void check_setup_request(void)
     }
 }
 
+static uint8_t s_tried_profiles;
+static uint64_t s_next_wifi_attempt;
+static bool s_was_online;
+
+static void retry_wifi(void)
+{
+    if (xEventGroupGetBits(s_wifi_bits) & WIFI_READY_BIT) {
+        if (!s_was_online) fmo_provision_remember_connected();
+        s_was_online = true;
+        s_tried_profiles = 0;
+        s_next_wifi_attempt = 0;
+        return;
+    }
+    s_was_online = false;
+    if (now_ms() < s_next_wifi_attempt) return;
+    esp_wifi_disconnect();
+    wifi_config_t config;
+    if (fmo_provision_next(&config, &s_tried_profiles)) {
+        if (esp_wifi_set_config(WIFI_IF_STA, &config) == ESP_OK) esp_wifi_connect();
+        memset(&config, 0, sizeof(config));
+        s_next_wifi_attempt = now_ms() + 25000;
+    } else {
+        /* A complete failed round backs off. Build-time-only configuration
+         * still reconnects without adding unverified credentials to NVS. */
+        if (!fmo_provision_preferred_mask()) esp_wifi_connect();
+        s_tried_profiles = 0;
+        s_next_wifi_attempt = now_ms() + 30000;
+    }
+}
+
+static void stop_socket(fmo_socket_t *socket)
+{
+    if (!socket->client) return;
+    esp_websocket_client_stop(socket->client);
+    esp_websocket_client_destroy(socket->client);
+    socket->client = NULL;
+    memset(&socket->rx, 0, sizeof(socket->rx));
+}
+
+static void clear_dns_cache(void *unused)
+{
+    (void)unused;
+    dns_clear_cache();
+}
+
 static void network_task(void *argument)
 {
     (void)argument;
@@ -427,8 +474,12 @@ static void network_task(void *argument)
         return;
     }
 
-    while (!(xEventGroupWaitBits(s_wifi_bits, WIFI_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(1000)) & WIFI_READY_BIT))
+    s_tried_profiles = fmo_provision_preferred_mask();
+    s_next_wifi_attempt = now_ms() + 25000;
+    while (!(xEventGroupWaitBits(s_wifi_bits, WIFI_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(1000)) & WIFI_READY_BIT)) {
         check_setup_request();
+        retry_wifi();
+    }
 
     char events_uri[160];
     char control_uri[160];
@@ -447,6 +498,14 @@ static void network_task(void *argument)
     unsigned diagnostics_tick = 0;
     for (;;) {
         check_setup_request();
+        EventBits_t old_bits = xEventGroupClearBits(s_wifi_bits, WIFI_READY_BIT << 1);
+        if (!(old_bits & WIFI_READY_BIT) || (old_bits & (WIFI_READY_BIT << 1))) {
+            stop_socket(&s_events_socket);
+            stop_socket(&s_control_socket);
+            if (old_bits & (WIFI_READY_BIT << 1))
+                tcpip_callback_wait(clear_dns_cache, NULL);
+        }
+        retry_wifi();
         if (xEventGroupGetBits(s_wifi_bits) & WIFI_READY_BIT) {
             if (!s_events_socket.client) {
                 err = start_socket(&s_events_socket, events_uri);

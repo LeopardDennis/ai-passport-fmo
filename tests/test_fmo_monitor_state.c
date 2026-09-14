@@ -47,6 +47,9 @@ int main(void)
     assert(!state.events_connected);
     assert(!state.control_connected);
     assert(!state.channel_valid);
+    assert(state.last_speaker[0] == '\0' && state.grid[0] == '\0');
+    assert(state.last_speaker_ms == 0);
+    assert(state.channel_uid == 0 && state.channel_name[0] == '\0');
 
     fmo_monitor_set_channel(&state, 42, "LOCAL NET");
     fmo_monitor_apply_speaker(&state, "BG5ESN", "PM00AA", true, false, 4000);

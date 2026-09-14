@@ -5,6 +5,7 @@ idf_component_register(
          "fmo_ws_rx.c"
          "fmo_provision.c"
          "fmo_credentials.c"
+         "fmo_wifi_profiles.c"
          "ui_pixel.c"
          "ui_pixel_math.c"
          "demo_radio.c"

@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+- Save up to five Wi-Fi profiles with legacy migration, explicit deletion and
+  bounded automatic failover; prefer the last successful network, retain healthy
+  connections, and recreate FMO clients after Wi-Fi loss.
+
 - Add password-protected phone Wi-Fi setup, nearby SSID selection, verified NVS
   persistence, long-OK reconfiguration, default fmo.local mDNS resolution, and
   credential-free installation builds via `./tools/validate.sh --setup`.

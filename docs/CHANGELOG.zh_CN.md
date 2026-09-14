@@ -6,6 +6,9 @@
 
 ## Unreleased
 
+- 支持五组 Wi-Fi、旧配置迁移、主动删除和有重试间隔的自动切换；优先上次成功网络，
+  正常连接不主动换网，Wi-Fi 断线后重新创建 FMO 连接。
+
 - 新增加密热点手机配网、附近 Wi-Fi 选择、连接验证后保存 NVS、长按 OK 重新配网、
   默认 fmo.local mDNS 解析，以及 `./tools/validate.sh --setup` 无凭据安装固件构建。
 

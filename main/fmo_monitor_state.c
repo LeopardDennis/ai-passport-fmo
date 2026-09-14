@@ -30,6 +30,11 @@ void fmo_monitor_set_wifi(fmo_monitor_state_t *state, bool connected)
         state->control_connected = false;
         state->speaking = false;
         state->speaker[0] = '\0';
+        state->last_speaker[0] = '\0';
+        state->grid[0] = '\0';
+        state->last_speaker_ms = 0;
+        state->channel_uid = 0;
+        state->channel_name[0] = '\0';
     }
 }
 

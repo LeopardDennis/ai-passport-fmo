@@ -24,6 +24,24 @@ it does not act as a virtual FMO radio or connect directly to an FMO MQTT server
 
 ## Configure
 
+Up to five verified Wi-Fi networks are saved. The previous single-network format
+is imported automatically. Updating an existing SSID replaces its password only
+after a successful connection; a sixth distinct network is rejected until one
+is deleted. The setup page lists saved SSIDs (never passwords), provides explicit
+deletion with confirmation, and has a finish button to exit without adding a
+network. Deleting all entries keeps setup available and does not restore legacy
+credentials. Use long OK again to add another network after provisioning.
+
+Boot tries the last successful network first. While disconnected, each connection
+attempt gets up to 25 seconds, followed by other saved networks ordered by scanned
+signal strength; unseen/hidden entries are also tried. After exhausting the list,
+the firmware waits 30 seconds before another round. A healthy connection is never
+switched merely for stronger signal or because FMO is unavailable. Wi-Fi loss
+closes the old FMO sockets; reconnection creates fresh clients for the new LAN.
+The new LAN must also provide access to FMO. Only a change of preferred network
+is written to NVS, not every reconnect. WPA2-or-newer personal networks and open
+networks are supported, not enterprise authentication.
+
 On first boot, a credential-free build starts a protected hotspot. Join the
 `FMO-Setup-XXXX` network using the random password shown on the Passport screen.
 Keep the phone connected even if it reports no Internet, then open

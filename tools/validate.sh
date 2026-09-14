@@ -39,6 +39,10 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_fmo_credentials.c main/fmo_credentials.c -o "${test_dir}/test_fmo_credentials"
     "${test_dir}/test_fmo_credentials"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_fmo_wifi_profiles.c main/fmo_wifi_profiles.c main/fmo_credentials.c \
+        -o "${test_dir}/test_fmo_wifi_profiles"
+    "${test_dir}/test_fmo_wifi_profiles"
     python3 tests/test_verify_firmware.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
