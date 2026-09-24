@@ -10,7 +10,7 @@
 #include "bsp_pins.h"
 #include "fmo_monitor_state.h"
 #include "fmo_network.h"
-#include "ui_pixel.h"
+#include "fmo_ui.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -44,132 +44,12 @@ static char s_setup_password[17];
 static int s_battery_soc = -1;
 static int s_brightness = CONFIG_FMO_BACKLIGHT;
 
-static lv_obj_t *s_link_label;
-static lv_obj_t *s_battery_label;
-static lv_obj_t *s_channel_label;
-static lv_obj_t *s_caption_label;
-static lv_obj_t *s_air_label;
-static lv_obj_t *s_callsign_label;
-static lv_obj_t *s_detail_label;
-static lv_obj_t *s_hint_label;
 static uint64_t s_last_render_second = UINT64_MAX;
 static uint64_t s_hint_until_ms;
-
-/* LVGL copies text on every set, even when equal. Avoid needless allocations. */
-static void label_text(lv_obj_t *label, const char *text)
-{
-    if (strcmp(lv_label_get_text(label), text) != 0) lv_label_set_text(label, text);
-}
-
-static void label_color(lv_obj_t *label, uint32_t color)
-{
-    if (!lv_color_eq(lv_obj_get_style_text_color(label, 0), lv_color_hex(color)))
-        lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
-}
 
 static uint64_t monotonic_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000);
-}
-
-static void render_link(void)
-{
-    if (s_setup_ssid[0]) {label_text(s_link_label, "PHONE WIFI SETUP"); return;}
-    const char *text;
-    uint32_t color;
-    if (s_error[0] != '\0') {
-        text = s_error;
-        color = UI_RED;
-    } else if (!s_state.wifi_connected) {
-        text = "CONNECTING WIFI";
-        color = UI_ORANGE;
-    } else if (!s_state.events_connected) {
-        text = "CONNECTING FMO";
-        color = UI_ORANGE;
-    } else if (!s_state.control_connected || !s_state.channel_valid) {
-        text = "SYNCING CHANNEL";
-        color = UI_ORANGE;
-    } else {
-        text = "LIVE";
-        color = UI_GRASS_DARK;
-    }
-    label_text(s_link_label, text);
-    label_color(s_link_label, color);
-}
-
-static void render_channel(void)
-{
-    label_text(s_caption_label, s_setup_ssid[0] ? "JOIN THIS HOTSPOT" : "CHANNEL");
-    if (s_setup_ssid[0]) {label_text(s_channel_label, s_setup_ssid); return;}
-    char text[64];
-    if (!s_state.channel_valid) {
-        snprintf(text, sizeof(text), "--");
-    } else if (s_state.channel_name[0] != '\0') {
-        snprintf(text, sizeof(text), "%s", s_state.channel_name);
-    } else if (s_state.channel_uid != 0) {
-        snprintf(text, sizeof(text), "CHANNEL #%" PRIu32, s_state.channel_uid);
-    } else {
-        snprintf(text, sizeof(text), "--");
-    }
-    label_text(s_channel_label, text);
-}
-
-static void render_speaker(uint64_t now_ms)
-{
-    if (s_setup_ssid[0]) {
-        label_text(s_air_label, "HOTSPOT PASSWORD");
-        label_text(s_callsign_label, s_setup_password);
-        label_text(s_detail_label, "192.168.4.1");
-        return;
-    }
-    char detail[64];
-    if (!s_state.channel_valid || !s_state.events_connected) {
-        label_text(s_air_label, "WAITING FOR SYNC");
-        label_color(s_air_label, UI_ORANGE);
-        label_text(s_callsign_label, "--");
-        detail[0] = '\0';
-    } else if (s_state.speaking) {
-        label_text(s_air_label, "ON AIR");
-        label_color(s_air_label, UI_RED);
-        label_text(s_callsign_label, s_state.speaker);
-        if (s_state.grid[0]) {
-            snprintf(detail, sizeof(detail), "%s | %s",
-                     s_state.speaker_is_host ? "HOST" : "REMOTE", s_state.grid);
-        } else {
-            snprintf(detail, sizeof(detail), "%s",
-                     s_state.speaker_is_host ? "HOST" : "REMOTE");
-        }
-    } else if (s_state.last_speaker[0] != '\0') {
-        uint64_t age_seconds = now_ms >= s_state.last_speaker_ms
-                                   ? (now_ms - s_state.last_speaker_ms) / 1000
-                                   : 0;
-        label_text(s_air_label, "LAST HEARD");
-        label_color(s_air_label, UI_SKY_DARK);
-        label_text(s_callsign_label, s_state.last_speaker);
-        if (s_state.grid[0]) {
-            snprintf(detail, sizeof(detail), "%s | %" PRIu64 "s AGO",
-                     s_state.grid, age_seconds);
-        } else {
-            snprintf(detail, sizeof(detail), "%" PRIu64 "s AGO", age_seconds);
-        }
-    } else {
-        label_text(s_air_label, "LISTENING");
-        label_color(s_air_label, UI_GRASS_DARK);
-        label_text(s_callsign_label, "--");
-        snprintf(detail, sizeof(detail), "WAITING FOR A CALLSIGN");
-    }
-    label_text(s_detail_label, detail);
-}
-
-static void render_battery(void)
-{
-    if (s_battery_soc >= 0) {
-        char text[16];
-        snprintf(text, sizeof(text), "BAT %d%%", s_battery_soc);
-        label_text(s_battery_label, text);
-    } else {
-        label_text(s_battery_label, "BAT --");
-    }
 }
 
 static void apply_input(const app_input_t *input)
@@ -192,7 +72,6 @@ static void apply_input(const app_input_t *input)
     } else if (button == BSP_BTN_OK) {
         fmo_network_request_refresh();
         s_hint_until_ms = monotonic_ms() + 3000;
-        label_text(s_hint_label, "SYNC REQUESTED");
     }
 }
 
@@ -218,63 +97,20 @@ static void ui_tick(lv_timer_t *timer)
     uint64_t now_ms = monotonic_ms();
     uint64_t current_second = now_ms / 1000;
     if (dirty || current_second != s_last_render_second) {
-        render_link();
-        render_channel();
-        render_speaker(now_ms);
-        render_battery();
-        if (now_ms >= s_hint_until_ms) {
-            label_text(s_hint_label, "UP/DN LIGHT  OK SYNC");
-        }
+        fmo_ui_render(&s_state, s_error, s_setup_ssid, s_setup_password,
+                      s_battery_soc, now_ms, now_ms < s_hint_until_ms);
         s_last_render_second = current_second;
     }
 }
 
-static lv_obj_t *create_centered_label(lv_obj_t *parent, const char *text,
-                                       const lv_font_t *font, int y)
-{
-    lv_obj_t *label = ui_pixel_label(parent, text, font, UI_INK);
-    lv_obj_set_width(label, 188);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, y);
-    return label;
-}
-
 static void build_ui(void)
 {
-    lv_obj_t *screen = ui_pixel_screen_create("FMO LIVE");
-
-    s_battery_label = ui_pixel_label(screen, "BAT --", &lv_font_montserrat_14,
-                                     0xFFFFFF);
-    lv_obj_set_pos(s_battery_label, 168, 29);
-
-    lv_obj_t *panel = ui_pixel_panel_create(screen, 12, 55, 216, 174, UI_PAPER);
-    s_link_label = create_centered_label(panel, "CONNECTING WIFI",
-                                         &lv_font_montserrat_14, 0);
-
-    lv_obj_t *caption = create_centered_label(panel, "CHANNEL",
-                                               &lv_font_montserrat_14, 25);
-    s_caption_label = caption;
-    lv_obj_set_style_text_color(caption, lv_color_hex(UI_SKY_DARK), 0);
-    s_channel_label = create_centered_label(panel, "--",
-                                             &lv_font_montserrat_20, 44);
-    lv_label_set_long_mode(s_channel_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
-
-    s_air_label = create_centered_label(panel, "LISTENING",
-                                         &lv_font_montserrat_14, 81);
-    s_callsign_label = create_centered_label(panel, "--",
-                                              &lv_font_montserrat_20, 105);
-    s_detail_label = create_centered_label(panel, "WAITING FOR A CALLSIGN",
-                                            &lv_font_montserrat_14, 134);
-
-    lv_obj_t *hint_panel = ui_pixel_panel_create(screen, 12, 239, 168, 36, UI_MUTED);
-    s_hint_label = ui_pixel_label(hint_panel, "UP/DN LIGHT  OK SYNC",
-                                  &lv_font_montserrat_14, UI_INK);
-    lv_obj_set_width(s_hint_label, 145);
-    lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_center(s_hint_label);
-    ui_pixel_mascot_create(screen, 190, 238);
-
-    lv_screen_load(screen);
+    fmo_ui_create();
+    lv_mem_monitor_t memory;
+    lv_mem_monitor(&memory);
+    ESP_LOGI(TAG, "UI ready; LVGL peak=%u free=%u largest=%u",
+             (unsigned)memory.max_used, (unsigned)memory.free_size,
+             (unsigned)memory.free_biggest_size);
     lv_timer_create(ui_tick, 200, NULL);
 }
 
@@ -300,7 +136,7 @@ static void battery_task(void *argument)
         };
         xQueueSend(s_input_queue, &input, 0);
         ESP_LOGD(TAG, "Battery stack free=%u", (unsigned)uxTaskGetStackHighWaterMark(NULL));
-        vTaskDelay(pdMS_TO_TICKS(30000));
+        vTaskDelay(pdMS_TO_TICKS(120000));
     }
 }
 

@@ -28,7 +28,6 @@ static atomic_bool s_reconnect;
 static atomic_bool s_setup_requested;
 static atomic_bool s_setup_active;
 
-#define WIFI_READY_BIT BIT0
 #define FMO_CHANNEL_REFRESH_MS 1000
 #define FMO_CHANNEL_MAX_AGE_MS 5000
 
@@ -336,16 +335,23 @@ static esp_err_t start_socket(fmo_socket_t *socket, const char *uri)
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
-    (void)data;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         if (atomic_load(&s_reconnect)) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupClearBits(s_wifi_bits, WIFI_READY_BIT);
-        xEventGroupSetBits(s_wifi_bits, WIFI_READY_BIT << 1);
+        const wifi_event_sta_disconnected_t *disconnected = data;
+        if (disconnected) {
+            ESP_LOGW(TAG, "Station disconnected: reason=%u", disconnected->reason);
+            if (atomic_load(&s_setup_active))
+                fmo_provision_note_disconnect_reason(disconnected->reason);
+        }
+        xEventGroupClearBits(s_wifi_bits, FMO_WIFI_READY_BIT);
+        xEventGroupSetBits(s_wifi_bits, FMO_WIFI_DISCONNECTED_BIT);
         post_link(FMO_UPDATE_WIFI, false);
         /* The network worker owns retries and profile switching. */
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_STOP) {
+        xEventGroupSetBits(s_wifi_bits, FMO_WIFI_STOPPED_BIT);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(s_wifi_bits, WIFI_READY_BIT);
+        xEventGroupSetBits(s_wifi_bits, FMO_WIFI_READY_BIT);
         post_link(FMO_UPDATE_WIFI, true);
     }
 }
@@ -400,11 +406,11 @@ static esp_err_t start_wifi(void)
     if (err == ESP_OK && setup) {
         atomic_store(&s_setup_active, true);
         atomic_store(&s_setup_requested, false);
-        err = fmo_provision_run(s_wifi_bits, WIFI_READY_BIT, setup_display);
+        err = fmo_provision_run(s_wifi_bits, FMO_WIFI_READY_BIT, setup_display);
         atomic_store(&s_setup_active, false);
         setup_display("", "");
         atomic_store(&s_reconnect, true);
-        if (err == ESP_OK && !(xEventGroupGetBits(s_wifi_bits) & WIFI_READY_BIT)) esp_wifi_connect();
+        if (err == ESP_OK && !(xEventGroupGetBits(s_wifi_bits) & FMO_WIFI_READY_BIT)) esp_wifi_connect();
     }
     return err;
 }
@@ -423,7 +429,7 @@ static bool s_was_online;
 
 static void retry_wifi(void)
 {
-    if (xEventGroupGetBits(s_wifi_bits) & WIFI_READY_BIT) {
+    if (xEventGroupGetBits(s_wifi_bits) & FMO_WIFI_READY_BIT) {
         if (!s_was_online) fmo_provision_remember_connected();
         s_was_online = true;
         s_tried_profiles = 0;
@@ -476,7 +482,7 @@ static void network_task(void *argument)
 
     s_tried_profiles = fmo_provision_preferred_mask();
     s_next_wifi_attempt = now_ms() + 25000;
-    while (!(xEventGroupWaitBits(s_wifi_bits, WIFI_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(1000)) & WIFI_READY_BIT)) {
+    while (!(xEventGroupWaitBits(s_wifi_bits, FMO_WIFI_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(1000)) & FMO_WIFI_READY_BIT)) {
         check_setup_request();
         retry_wifi();
     }
@@ -498,15 +504,15 @@ static void network_task(void *argument)
     unsigned diagnostics_tick = 0;
     for (;;) {
         check_setup_request();
-        EventBits_t old_bits = xEventGroupClearBits(s_wifi_bits, WIFI_READY_BIT << 1);
-        if (!(old_bits & WIFI_READY_BIT) || (old_bits & (WIFI_READY_BIT << 1))) {
+        EventBits_t old_bits = xEventGroupClearBits(s_wifi_bits, FMO_WIFI_DISCONNECTED_BIT);
+        if (!(old_bits & FMO_WIFI_READY_BIT) || (old_bits & FMO_WIFI_DISCONNECTED_BIT)) {
             stop_socket(&s_events_socket);
             stop_socket(&s_control_socket);
-            if (old_bits & (WIFI_READY_BIT << 1))
+            if (old_bits & FMO_WIFI_DISCONNECTED_BIT)
                 tcpip_callback_wait(clear_dns_cache, NULL);
         }
         retry_wifi();
-        if (xEventGroupGetBits(s_wifi_bits) & WIFI_READY_BIT) {
+        if (xEventGroupGetBits(s_wifi_bits) & FMO_WIFI_READY_BIT) {
             if (!s_events_socket.client) {
                 err = start_socket(&s_events_socket, events_uri);
                 if (err != ESP_OK) ESP_LOGW(TAG, "Events client creation failed; retrying");

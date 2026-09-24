@@ -24,6 +24,30 @@ it does not act as a virtual FMO radio or connect directly to an FMO MQTT server
 
 ## Configure
 
+The portrait UI uses black, orange and white based on the supplied FMO reference
+images (not an official color specification). The large callsign belongs to the
+active speaker: orange while speaking, white for the last-heard callsign while
+idle. An orange line indicates speech activity, not audio amplitude. Unknown
+metadata is not simulated. Fonts are bundled Montserrat and Noto Sans CJK for
+Chinese channel names, not a claim to match the original FMO typeface.
+Status and controls are in Chinese; callsigns, network names and addresses stay
+unchanged. The iOS-inspired battery capsule contains a numeric percentage, turns
+red at 20% or below, and shows an outlined unknown state when SOC is unavailable.
+It does not infer charging. Channel and callsign text is centered using visible
+glyph bounds, including smaller fonts for long callsigns and setup passwords.
+
+Native UI checks and actual LVGL framebuffer previews can be built after the
+firmware dependencies have been fetched:
+
+```bash
+cmake -S tests/ui_preview -B /tmp/fmo-ui-preview
+cmake --build /tmp/fmo-ui-preview
+ctest --test-dir /tmp/fmo-ui-preview --output-on-failure
+/tmp/fmo-ui-preview/fmo_ui_preview onair /tmp/fmo-onair.ppm
+```
+
+Other preview states are `lastheard`, `offline`, `setup`, `long`, and `error`.
+
 Up to five verified Wi-Fi networks are saved. The previous single-network format
 is imported automatically. Updating an existing SSID replaces its password only
 after a successful connection; a sixth distinct network is rejected until one
@@ -45,9 +69,11 @@ networks are supported, not enterprise authentication.
 On first boot, a credential-free build starts a protected hotspot. Join the
 `FMO-Setup-XXXX` network using the random password shown on the Passport screen.
 Keep the phone connected even if it reports no Internet, then open
-`http://192.168.4.1` manually. Choose a nearby 2.4 GHz Wi-Fi network or type a
+`http://192.168.9.1` manually. Choose a nearby 2.4 GHz Wi-Fi network or type a
 hidden SSID, enter its password, and submit. The list is scanned once per setup
 session. A failed connection can be retried without rebooting.
+When retrying a different network, the setup hotspot may briefly disconnect;
+rejoin it with the displayed password if the page stops responding.
 
 The firmware verifies Wi-Fi/DHCP for up to 25 seconds before saving credentials
 in its own `fmo_wifi` NVS namespace. It does not deliberately delete the previous
@@ -102,8 +128,8 @@ private keys, or unsanitized logs.
 - Confirm the Passport connects to the intended 2.4 GHz network.
 - Confirm the current channel matches the FMO screen after boot and after an
   FMO-side channel change.
-- Key and release a radio and verify `ON AIR`, callsign, host/grid metadata, and
-  `LAST HEARD` transitions.
+- Key and release a radio and verify the speaking indicator, callsign,
+  host/grid metadata, and last-heard transitions.
 - Leave both devices running through a Wi-Fi interruption and confirm automatic
   reconnection.
 - Check USB logs, minimum free heap, button response, display clipping, and

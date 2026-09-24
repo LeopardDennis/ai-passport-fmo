@@ -6,6 +6,31 @@
 
 ## Unreleased
 
+- Move the setup hotspot to `192.168.9.1/24` to avoid common home-LAN overlap.
+  Wait for the Wi-Fi station stop event before testing another credential so
+  late events from an earlier attempt cannot validate the new one. Log LVGL
+  pool usage at startup and check redraw headroom in the native UI test. The
+  setup page now distinguishes authentication, missing network, security-mode
+  and DHCP timeout failures. Add a macOS serial-log capture tool for device
+  diagnostics without flashing or sending commands.
+
+- Read battery SOC immediately on startup and then every two minutes instead
+  of every 30 seconds; FMO status refresh timing is unchanged.
+
+- Reduce the battery capsule from 44x22 to 32x16 pixels while retaining the
+  internal percentage and vertically centered status-bar alignment.
+
+- Translate monitor status and controls into Chinese and replace the BAT label
+  with an iOS-inspired battery capsule containing the percentage (red at 20% or
+  below, outlined when unavailable; charging is not inferred from SOC).
+
+- Center visible text vertically in channel and callsign rows, including
+  Chinese font padding, smaller long-callsign fonts, and setup transitions.
+
+- Replace the monitor's pixel scenery with a black/orange/white FMO-inspired
+  portrait UI, larger active-talker callsigns, Chinese channel glyphs, and a
+  matching setup screen. Add native LVGL rendering tests and framebuffer previews.
+
 - Save up to five Wi-Fi profiles with legacy migration, explicit deletion and
   bounded automatic failover; prefer the last successful network, retain healthy
   connections, and recreate FMO clients after Wi-Fi loss.

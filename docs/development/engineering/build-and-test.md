@@ -53,14 +53,30 @@ cc -std=c11 -Wall -Wextra -Werror -Imain \
 Use the unified validation entry point:
 
 ```bash
-./tools/validate.sh --static    # repository checks, workflows, links, secrets, host tests
-./tools/validate.sh --firmware  # build, merge-bin, offsets, and BLE compatibility
+./tools/validate.sh --static    # repository checks, workflows, links, secrets, host tests (including Node.js setup-page test)
+./tools/validate.sh --firmware  # build, merge-bin, offsets, BLE compatibility, native UI tests
 ./tools/validate.sh             # complete gate; requires an activated ESP-IDF environment
 ```
 
 CI calls the same script. Fix the shared script or environment if local and CI behavior differs; do not duplicate command sequences in workflows.
 
 Hardware-affecting changes must also run the applicable on-device checklist in the hardware guide. Report compilation separately from physical-device validation.
+
+## macOS device log capture
+
+The capture tool needs only Python 3. Start it before rebooting the Passport so
+the boot and reconnect sequence is included:
+
+```bash
+python3 tools/device-test/serial_capture.py --list-ports
+python3 tools/device-test/serial_capture.py --seconds 300
+# If multiple USB modems are present, specify the device:
+python3 tools/device-test/serial_capture.py --port /dev/cu.usbmodemXXXX --seconds 300
+```
+
+It does not flash or send commands. Raw logs are stored with private permissions
+under `/tmp/fmo-device-logs/`; the terminal summarizes boot, UI memory, Wi-Fi,
+WebSocket, and error events. Inspect and redact raw logs before sharing them.
 
 Never upload the app-only `build/FoloToy-AI-Passport.bin` to the community. Only
 the validated `build/FoloToy-AI-Passport-full.bin` contains the structure the

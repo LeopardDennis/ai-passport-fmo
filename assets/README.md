@@ -10,6 +10,16 @@ Keep each asset in the matching subdirectory and document its destination, namin
 
 ## Fonts
 
+`fonts/NotoSansCJKsc-Regular.otf` is the unmodified Noto CJK regular font from
+[Noto CJK](https://github.com/notofonts/noto-cjk/tree/main/Sans/OTF/SimplifiedChinese),
+licensed under SIL OFL 1.1 (`fonts/OFL.txt`). `fonts/fmo_channel_font.c` is the
+derived 16px, 2bpp compressed LVGL font, covering ASCII, CJK punctuation and basic
+Han characters U+4E00–U+9FFF. Extension-block characters and emoji are not covered.
+Only the generated C file is linked into the firmware; the original is retained
+for regeneration. Use `lv_font_conv@1.5.3` with the exact command in its header.
+LVGL font compression and large glyph offsets must be enabled. This font is for
+channel names, not the original FMO callsign typeface.
+
 Store reusable font files and generated font sources in `fonts/`.
 
 - Use descriptive names that include the family, weight, size, and format when relevant.

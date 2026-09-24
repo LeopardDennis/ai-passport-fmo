@@ -1,5 +1,7 @@
 idf_component_register(
     SRCS "main.c"
+         "fmo_ui.c"
+         "../assets/fonts/fmo_channel_font.c"
          "fmo_monitor_state.c"
          "fmo_network.c"
          "fmo_ws_rx.c"

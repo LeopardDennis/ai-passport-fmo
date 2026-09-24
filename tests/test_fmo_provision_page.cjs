@@ -34,5 +34,10 @@ const flush = async()=>{for(let i=0;i<15;i++)await Promise.resolve()};
   assert.equal(nodes.saved.children.length,0);assert.equal(nodes.finish.disabled,true);
   status=3;nodes.pass.value='secret';await vm.runInContext('poll()',context);
   assert.equal(nodes.pass.value,'');
+  for (const [code, expected] of [[7,/认证失败/],[8,/未找到/],[9,/安全模式/],[10,/获取 IP 超时/]]) {
+    status=code;await vm.runInContext('poll()',context);
+    assert.match(nodes.result.textContent,expected);
+    assert.equal(nodes.save.disabled,false);
+  }
   console.log('Provisioning page: PASS (safe SSID text, deletion, finish, capacity, password clearing)');
 })().catch(e=>{console.error(e);process.exitCode=1});

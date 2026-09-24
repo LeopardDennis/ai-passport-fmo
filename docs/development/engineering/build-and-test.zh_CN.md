@@ -49,14 +49,28 @@ cc -std=c11 -Wall -Wextra -Werror -Imain \
 统一验证入口：
 
 ```bash
-./tools/validate.sh --static    # 仓库一致性、workflow、文档链接、敏感信息、host tests
-./tools/validate.sh --firmware  # ESP-IDF build、merge-bin、偏移与 BLE 兼容校验
+./tools/validate.sh --static    # 仓库、workflow、文档、敏感信息及主机测试（含 Node.js 配网页面测试）
+./tools/validate.sh --firmware  # ESP-IDF build、merge-bin、BLE 兼容及原生界面测试
 ./tools/validate.sh             # 完整验证
 ```
 
 完整验证要求预先激活 ESP-IDF 5.5.3。CI 与本地使用同一脚本；若 CI 和本地行为不同，应先修复脚本或环境，而不是维护两份命令。
 
 涉及物理外设的改动必须在真机运行硬件指南验收清单，并把“编译通过”与“硬件验证通过”分开记录。
+
+## macOS 真机日志采集
+
+采集工具只依赖 Python 3。先开始采集，再重启 Passport，以记录完整的启动和重连过程：
+
+```bash
+python3 tools/device-test/serial_capture.py --list-ports
+python3 tools/device-test/serial_capture.py --seconds 300
+# 如果有多个 USB modem，请指定设备端口：
+python3 tools/device-test/serial_capture.py --port /dev/cu.usbmodemXXXX --seconds 300
+```
+
+工具不会烧录或发送命令。原始日志以私有权限保存在 `/tmp/fmo-device-logs/`，终端
+汇总启动、界面内存、Wi-Fi、WebSocket 和错误事件。分享前请检查并遮盖敏感内容。
 
 社区只能上传验证通过的 `build/FoloToy-AI-Passport-full.bin`，不得上传应用单镜像
 `build/FoloToy-AI-Passport.bin`，后者没有小程序可安全解析与转换的完整结构。

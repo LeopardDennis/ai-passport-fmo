@@ -8,6 +8,14 @@
 
 ## 字库（fonts）
 
+`fonts/NotoSansCJKsc-Regular.otf` 是未经修改的 Noto CJK 常规字体，来源为
+[Noto CJK](https://github.com/notofonts/noto-cjk/tree/main/Sans/OTF/SimplifiedChinese)，
+使用 SIL OFL 1.1 许可（`fonts/OFL.txt`）。`fonts/fmo_channel_font.c` 为转换后的
+16px、2bpp 压缩 LVGL 字库，覆盖 ASCII、中日韩标点及 U+4E00–U+9FFF 基本汉字区，
+不包含扩展区汉字或表情。固件只链接生成的 C 文件，原文件保留供重新生成。
+使用 `lv_font_conv@1.5.3` 执行生成文件头部的完整命令，并开启 LVGL 字体压缩和大字形偏移。
+该字库用于频道名称，不是 FMO 原厂呼号字体。
+
 可复用的字库文件与生成的字库源码放在 `fonts/`。
 
 - 命名要能反映字族、字重、字级与格式。

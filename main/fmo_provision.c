@@ -2,6 +2,7 @@
 #include "fmo_credentials.h"
 #include "fmo_wifi_profiles.h"
 #include "esp_http_server.h"
+#include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -38,8 +39,42 @@ static void to_wifi_config(wifi_config_t *config, const credentials_t *value)
     memcpy(config->sta.password, value->password, strlen(value->password));
     config->sta.threshold.authmode = value->password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 }
+
+static esp_err_t setup_ap_address(esp_netif_t *ap)
+{
+    /* The default 192.168.4.0/24 often overlaps a home LAN. Configure the
+     * AP before it starts so DHCP gives the phone the same subnet. */
+    esp_netif_ip_info_t info = {0};
+    esp_err_t err = esp_netif_str_to_ip4("192.168.9.1", &info.ip);
+    if (err != ESP_OK) return err;
+    info.gw = info.ip;
+    err = esp_netif_str_to_ip4("255.255.255.0", &info.netmask);
+    if (err != ESP_OK) return err;
+    err = esp_netif_dhcps_stop(ap);
+    if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) return err;
+    err = esp_netif_set_ip_info(ap, &info);
+    if (err != ESP_OK) return err;
+    return esp_netif_dhcps_start(ap);
+}
 static QueueHandle_t s_pending;
-static atomic_int s_status; /* 0 ready, 1 testing, 2 failed, 3 saved, 4 storage error, 5 deleted, 6 full */
+static atomic_int s_status; /* 0 ready, 1 testing, 2 failed, 3 saved, 4 storage error, 5 deleted, 6 full, 7 auth, 8 missing, 9 security, 10 DHCP */
+static atomic_int s_attempt_error;
+void fmo_provision_note_disconnect_reason(uint8_t reason)
+{
+    if (atomic_load(&s_status) != 1) return;
+    int status = 2;
+    switch (reason) {
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT: status = 7; break;
+    case WIFI_REASON_NO_AP_FOUND:
+    case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD: status = 8; break;
+    case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+    case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD: status = 9; break;
+    default: break;
+    }
+    if (status != 2) atomic_store(&s_attempt_error, status);
+}
 static char s_token[33];
 static uint32_t s_ap_address;
 static wifi_ap_record_t s_records[16];
@@ -66,6 +101,7 @@ static const char page_end[] =
 "if(s===3){result.textContent='配网成功，热点即将关闭。设备正在连接 FMO。';pass.value='';return}"
 "if(s===5){result.textContent='已删除';save.disabled=false;await refreshSaved();return}"
 "if(s===6){result.textContent='已满 5 组，请先删除一个网络。';save.disabled=false;return}"
+"if(s>=7&&s<=10){result.textContent=s===7?'密码或认证失败，请重试。':s===8?'未找到该 Wi-Fi，请检查名称和信号。':s===9?'Wi-Fi 安全模式不兼容。':'已连接 Wi-Fi，但获取 IP 超时。';save.disabled=false;return}"
 "if(s===2||s===4){result.textContent=s===2?'连接失败，请检查密码和信号后重试。':'保存失败，旧配置未被主动删除。请重试。';save.disabled=false;return}"
 "result.textContent='正在验证连接，请稍候…';setTimeout(poll,1000)}catch(e){result.textContent='请查看设备屏幕；若仍在配网，请重新连接热点并刷新。';save.disabled=false}}"
 "async function submit(data){save.disabled=true;try{const r=await fetch('/configure',{method:'POST',headers:{'Content-Type':'application/json','X-Setup-Token':token},body:JSON.stringify(data)});"
@@ -248,22 +284,36 @@ esp_err_t fmo_provision_force(void)
     if (err != ESP_OK) return err;
     err=nvs_set_u8(nvs,"setup",1); if(err == ESP_OK)err=nvs_commit(nvs); nvs_close(nvs); return err;
 }
+
+static esp_err_t restart_station(EventGroupHandle_t bits, EventBits_t ready)
+{
+    /* A previous association may still deliver GOT_IP after disconnect.
+     * STA_STOP is the barrier before testing a different credential. The AP
+     * briefly drops during the restart, so the phone may need to rejoin. */
+    xEventGroupClearBits(bits, FMO_WIFI_STOPPED_BIT);
+    esp_err_t err = esp_wifi_stop();
+    if (err != ESP_OK) return err;
+    if (!(xEventGroupWaitBits(bits, FMO_WIFI_STOPPED_BIT, pdTRUE, pdTRUE,
+                              pdMS_TO_TICKS(3000)) & FMO_WIFI_STOPPED_BIT))
+        return ESP_ERR_TIMEOUT;
+    xEventGroupClearBits(bits, ready | FMO_WIFI_DISCONNECTED_BIT);
+    return esp_wifi_start();
+}
+
 esp_err_t fmo_provision_run(EventGroupHandle_t bits, EventBits_t ready, fmo_setup_display_t display)
 {
     if (!s_profiles_lock) return ESP_ERR_NO_MEM;
     s_pending=xQueueCreate(1,sizeof(setup_request_t)); if(!s_pending)return ESP_ERR_NO_MEM;
     esp_netif_t *ap=esp_netif_create_default_wifi_ap();
-    if(!ap){vQueueDelete(s_pending);return ESP_ERR_NO_MEM;}
+    if(!ap){vQueueDelete(s_pending);s_pending=NULL;return ESP_ERR_NO_MEM;}
     httpd_handle_t server=NULL;
-    uint8_t mac[6] = {0};
-    esp_err_t err = esp_wifi_get_mac(WIFI_IF_STA, mac);
-    if (err != ESP_OK) {
-        esp_netif_destroy_default_wifi(ap);
-        vQueueDelete(s_pending);
-        s_pending = NULL;
-        return err;
-    }
     wifi_config_t config={0};
+    bool station_attempted = false;
+    esp_err_t err = setup_ap_address(ap);
+    if (err != ESP_OK) goto done;
+    uint8_t mac[6] = {0};
+    err = esp_wifi_get_mac(WIFI_IF_STA, mac);
+    if (err != ESP_OK) goto done;
     snprintf((char *)config.ap.ssid,sizeof(config.ap.ssid),"FMO-Setup-%02X%02X",mac[4],mac[5]);
     snprintf((char *)config.ap.password,sizeof(config.ap.password),"%08" PRIX32 "%04" PRIX32,
              esp_random(), esp_random() & 0xffff);
@@ -317,13 +367,17 @@ esp_err_t fmo_provision_run(EventGroupHandle_t bits, EventBits_t ready, fmo_setu
         }
         if (request.finish) {
             if (!updated.count) {atomic_store(&s_status, 2); continue;}
+            if (station_attempted) {
+                err = restart_station(bits, ready);
+                if (err != ESP_OK) goto done;
+                station_attempted = false;
+            }
             xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
             err = save_profiles(&updated, true);
             xSemaphoreGive(s_profiles_lock);
             if (err != ESP_OK) {atomic_store(&s_status, 4); continue;}
             wifi_config_t selected;
             to_wifi_config(&selected, &updated.entries[updated.preferred]);
-            esp_wifi_disconnect();
             xEventGroupClearBits(bits, ready);
             err = esp_wifi_set_config(WIFI_IF_STA, &selected);
             memset(&selected, 0, sizeof(selected));
@@ -339,28 +393,32 @@ esp_err_t fmo_provision_run(EventGroupHandle_t bits, EventBits_t ready, fmo_setu
             memset(&value, 0, sizeof(value));
             continue;
         }
-        /* Drain the previous disconnect before clearing readiness, so a stale
-         * GOT_IP cannot validate a different credential submission. */
-        xEventGroupClearBits(bits, ready << 1);
-        wifi_ap_record_t previous;
-        bool was_connected = esp_wifi_sta_get_ap_info(&previous) == ESP_OK;
-        esp_err_t disconnected = esp_wifi_disconnect();
-        if (was_connected && disconnected == ESP_OK &&
-            !(xEventGroupWaitBits(bits, ready << 1, pdTRUE, pdTRUE, pdMS_TO_TICKS(2000)) & (ready << 1))) {
-            atomic_store(&s_status, 2);
-            memset(&value, 0, sizeof(value));
-            continue;
+        if (station_attempted) {
+            err = restart_station(bits, ready);
+            if (err != ESP_OK) goto done;
+            station_attempted = false;
         }
-        xEventGroupClearBits(bits,ready);
+        atomic_store(&s_attempt_error, 2);
+        xEventGroupClearBits(bits, ready | FMO_WIFI_DISCONNECTED_BIT);
         wifi_config_t sta={0}; memcpy(sta.sta.ssid,value.ssid,strlen(value.ssid)); memcpy(sta.sta.password,value.password,strlen(value.password));
         sta.sta.threshold.authmode = value.password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
         err=esp_wifi_set_config(WIFI_IF_STA,&sta);
-        if(err==ESP_OK)err=esp_wifi_connect();
+        if(err==ESP_OK) {
+            err=esp_wifi_connect();
+            station_attempted = err == ESP_OK;
+        }
         bool connected=err==ESP_OK && (xEventGroupWaitBits(bits,ready,pdFALSE,pdTRUE,pdMS_TO_TICKS(25000)) & ready);
         wifi_ap_record_t joined;
         connected = connected && esp_wifi_sta_get_ap_info(&joined) == ESP_OK &&
             strncmp((char *)joined.ssid, value.ssid, 32) == 0;
-        if(!connected){esp_wifi_disconnect();atomic_store(&s_status,2);memset(&value,0,sizeof(value));continue;}
+        if(!connected){
+            int failure = atomic_load(&s_attempt_error);
+            if (failure == 2 && esp_wifi_sta_get_ap_info(&joined) == ESP_OK) failure = 10;
+            esp_wifi_disconnect();
+            atomic_store(&s_status, failure);
+            memset(&value,0,sizeof(value));
+            continue;
+        }
         xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
         err = save_profiles(&updated, true);
         xSemaphoreGive(s_profiles_lock);

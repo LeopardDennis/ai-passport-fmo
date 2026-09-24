@@ -43,6 +43,7 @@ run_static_checks() {
         tests/test_fmo_wifi_profiles.c main/fmo_wifi_profiles.c main/fmo_credentials.c \
         -o "${test_dir}/test_fmo_wifi_profiles"
     "${test_dir}/test_fmo_wifi_profiles"
+    node tests/test_fmo_provision_page.cjs
     python3 tests/test_verify_firmware.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
@@ -78,6 +79,12 @@ run_firmware_checks() (
     idf.py -B "${validation_build_dir}" merge-bin \
         -o "${validation_build_dir}/FoloToy-AI-Passport-full.bin"
     python3 tools/verify_firmware.py "${validation_build_dir}"
+    # The native preview uses the production UI and the same LVGL pool budget.
+    cmake -S tests/ui_preview -B "${validation_build_dir}/ui_preview" \
+        >"${validation_build_dir}/ui_configure.log"
+    cmake --build "${validation_build_dir}/ui_preview" -j 2 \
+        >"${validation_build_dir}/ui_build.log"
+    ctest --test-dir "${validation_build_dir}/ui_preview" --output-on-failure
     mkdir -p "${output_dir}"
     install -m 0644 \
         "${validation_build_dir}/FoloToy-AI-Passport-full.bin" \
