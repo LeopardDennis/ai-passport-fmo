@@ -40,3 +40,10 @@
 - 与当前 BSP 音频路径匹配时优先采用 16 kHz、16 位单声道 PCM。
 - 嵌入音频前评估 Flash 与内部 RAM 成本；长录音应流式或分块。
 - 无再分发许可不提交媒体文件。
+
+## FMO 频道字库
+
+`fonts/NotoSansCJKsc-Regular.otf` 和 `fonts/fmo_channel_font.c` 保留 Noto 字体来源及原始
+16 px、2 bpp 压缩字形，许可见 `fonts/OFL.txt`。构建时 `tools/compact_font.py`
+无损拆成位图各小于 1 MiB 的回退字体；固件和原生预览使用同一生成源码和紧凑字形描述。
+不删除现有字符或抗锯齿效果，也不增加资源分区。

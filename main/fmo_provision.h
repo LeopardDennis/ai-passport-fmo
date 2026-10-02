@@ -1,5 +1,6 @@
 #pragma once
 #include "esp_wifi.h"
+#include "fmo_endpoint.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include <stdbool.h>
@@ -8,6 +9,7 @@ typedef void (*fmo_setup_display_t)(const char *ssid, const char *password);
 #define FMO_WIFI_READY_BIT BIT0
 #define FMO_WIFI_DISCONNECTED_BIT BIT1
 #define FMO_WIFI_STOPPED_BIT BIT2
+#define FMO_WIFI_CANCEL_BIT BIT3
 bool fmo_provision_load(wifi_config_t *config, bool *force);
 esp_err_t fmo_provision_force(void);
 /* Network-worker only, outside provisioning. Scans only while disconnected. */
@@ -20,3 +22,6 @@ void fmo_provision_note_disconnect_reason(uint8_t reason);
  * No WebSocket clients may be running. Returns after verified NVS persistence. */
 esp_err_t fmo_provision_run(EventGroupHandle_t bits, EventBits_t ready,
                             fmo_setup_display_t display);
+
+/* Saved LAN target takes precedence over compile-time defaults. */
+void fmo_provision_get_endpoint(fmo_endpoint_t *endpoint);

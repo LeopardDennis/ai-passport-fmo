@@ -44,3 +44,12 @@ Store reusable music and sound-effect sources in `music/`.
 - Prefer 16 kHz, 16-bit mono PCM when it matches the current BSP audio path.
 - Check Flash and internal-RAM cost before embedding audio; stream or chunk long recordings.
 - Do not commit media without redistribution permission.
+
+## FMO channel font
+
+`fonts/NotoSansCJKsc-Regular.otf` and `fonts/fmo_channel_font.c` retain the licensed
+Noto source and canonical 16 px, 2 bpp compressed glyphs (see `fonts/OFL.txt`).
+`tools/compact_font.py` losslessly splits the generated font at build time into
+fallback fonts whose bitmaps each fit below 1 MiB. Firmware and native preview
+both compile that generated source with compact glyph descriptors. No existing
+characters or antialiasing are removed, and no new resource partition is required.

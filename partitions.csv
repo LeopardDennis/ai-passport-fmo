@@ -2,5 +2,9 @@
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
 factory,  app,  factory, 0x10000,  0x300000,
+# Retain the legacy cache range so installation cleanup can erase it safely.
+pdk_cache,data, nvs,     0x310000, 0x10000,
+# Installer writes a fresh reset request; boot replaces it only after cleanup.
+fmo_install,data, undefined,0x320000,0x1000,
 cardid,   data, nvs,     0x356000, 0x4000,
 recovery, app,  test,    0x700000, 0x100000,

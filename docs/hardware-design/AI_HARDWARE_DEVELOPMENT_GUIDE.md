@@ -113,6 +113,12 @@ The LVGL DMA buffer is one `240 × 20` RGB565 buffer, about 9.6 KB; the LVGL int
 
 LVGL is not thread-safe. Timer callbacks in LVGL context may access objects directly. Button callbacks and worker tasks must use `bsp_lvgl_lock()`/`bsp_lvgl_unlock()`. Stop producers before deleting a page and clear static object pointers afterward.
 
+`bsp_display_sleep(bool)` sleeps or wakes the panel and leaves the backlight off
+on transitions. Call it from LVGL context or under its lock. Pause the display
+refresh timer before sleep; after a successful wake, resume the timer, invalidate
+and redraw the screen, then restore the backlight. Handle errors without claiming
+a successful transition. This API does not suspend Wi-Fi or put the MCU to sleep.
+
 ## 6. ADC button ladder
 
 GPIO0 has an external 10 kΩ pull-up to 3.3 V. UP, DOWN, and OK connect it to ground through 0 Ω, 1 kΩ, and 2.2 kΩ respectively.

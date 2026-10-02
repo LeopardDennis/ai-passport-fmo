@@ -8,6 +8,12 @@
 > `build/FoloToy-AI-Passport-full.bin`。CI 仅上传验证产物，已关闭自动发布 Release。
 > 详情参见根目录 README。以下原有流程保留为模板参考。
 
+FMO 完整包还包含写入 `0x320000` 的 `fmo_install.bin`，在 `fmo_install` 数据
+分区携带安装重置请求。`0x310000` 的旧 `pdk_cache` 分区（64 KB）保留声明以供清理。
+FMO 在联网前清除应用数据，最后写入完成标记；`cardid` 和 Recovery 不参与清理。
+校验器必须检查分区布局和重置请求载荷。只刷应用镜像不具备同版重刷清理语义。
+
+
 # 小程序 BLE 固件兼容规范
 
 本仓库是二创固件模板。任何基于它开发的应用，都必须保持可由 AI Passport

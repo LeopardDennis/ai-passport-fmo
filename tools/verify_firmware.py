@@ -13,6 +13,7 @@ from pathlib import Path
 EXPECTED_IMAGES = (
     (0x0000, "bootloader/bootloader.bin"),
     (0x8000, "partition_table/partition-table.bin"),
+    (0x320000, "fmo_install.bin"),
     (0x10000, "FoloToy-AI-Passport.bin"),
 )
 
@@ -73,6 +74,12 @@ def parse_partition_table(raw: bytes) -> tuple[list[Partition], bool]:
     return partitions, found_md5
 
 
+def verify_install_payload(merged: bytes) -> None:
+    seed = b"FMO_RESET_ON_INSTALL_V1\n"
+    if merged[0x320000 : 0x320000 + len(seed)] != seed:
+        raise ValueError("merged artifact is missing the fresh-install reset request")
+
+
 def verify_recovery_contract(merged: bytes, build_dir: Path) -> None:
     """Enforce the artifact/layout contract used by mini-program BLE install."""
     table = merged[
@@ -85,6 +92,8 @@ def verify_recovery_contract(merged: bytes, build_dir: Path) -> None:
     by_label = {item.label: item for item in partitions}
     expected = {
         "factory": Partition(0, 0, 0x10000, APP_MAX_SIZE, "factory"),
+        "pdk_cache": Partition(1, 2, 0x310000, 0x10000, "pdk_cache"),
+        "fmo_install": Partition(1, 6, 0x320000, 0x1000, "fmo_install"),
         "cardid": Partition(1, 2, CARDID_OFFSET, CARDID_SIZE, "cardid"),
         "recovery": Partition(0, 0x20, RECOVERY_OFFSET, RECOVERY_SIZE, "recovery"),
     }
@@ -102,6 +111,7 @@ def verify_recovery_contract(merged: bytes, build_dir: Path) -> None:
         if item.label != "recovery" and item.offset < RECOVERY_OFFSET + RECOVERY_SIZE and RECOVERY_OFFSET < item.end:
             raise ValueError(f"partition {item.label!r} overlaps permanent Recovery")
 
+    verify_install_payload(merged)
     app_path = build_dir / "FoloToy-AI-Passport.bin"
     app_size = app_path.stat().st_size
     if app_size > APP_MAX_SIZE:

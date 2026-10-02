@@ -26,5 +26,8 @@ int main(void)
     assert(fmo_ws_rx_feed(&rx, 1, false, sizeof(full)-1, 0, full, sizeof(full)-1) == FMO_RX_MORE);
     assert(fmo_ws_rx_feed(&rx, 0, true, 1, 0, "x", 1) == FMO_RX_INVALID);
     assert(fmo_ws_rx_feed(&rx, 1, true, 2, 0, "{}", 2) == FMO_RX_COMPLETE);
+    const char embedded_null[] = {'{', 0, '}'};
+    assert(fmo_ws_rx_feed(&rx, 1, true, 3, 0, embedded_null, 3) == FMO_RX_INVALID);
+    assert(fmo_ws_rx_feed(&rx, 1, true, 2, 0, "{}", 2) == FMO_RX_COMPLETE);
     return 0;
 }

@@ -1,4 +1,5 @@
 #include "fmo_monitor_state.h"
+#include "fmo_text.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -74,7 +75,7 @@ void fmo_monitor_set_channel(fmo_monitor_state_t *state, uint32_t uid,
     }
     state->channel_uid = uid;
     state->channel_valid = uid != 0;
-    copy_text(state->channel_name, sizeof(state->channel_name), name);
+    fmo_text_copy_utf8(state->channel_name, sizeof(state->channel_name), name);
 }
 
 void fmo_monitor_apply_speaker(fmo_monitor_state_t *state,

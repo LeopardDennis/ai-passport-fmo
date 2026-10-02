@@ -26,6 +26,8 @@ def sample_table() -> bytes:
         (1, 2, 0x9000, 0x6000, "nvs"),
         (1, 1, 0xF000, 0x1000, "phy_init"),
         (0, 0, 0x10000, 0x300000, "factory"),
+        (1, 2, 0x310000, 0x10000, "pdk_cache"),
+        (1, 6, 0x320000, 0x1000, "fmo_install"),
         (1, 2, 0x356000, 0x4000, "cardid"),
         (0, 0x20, 0x700000, 0x100000, "recovery"),
     )
@@ -54,6 +56,17 @@ class PartitionParserTest(unittest.TestCase):
         self.assertTrue(found_md5)
         self.assertEqual(partitions[-2].label, "cardid")
         self.assertEqual(partitions[-1].offset, VERIFY.RECOVERY_OFFSET)
+
+    def test_install_request_must_be_packaged(self) -> None:
+        seed = b"FMO_RESET_ON_INSTALL_V1\n"
+        raw = bytearray(b"\xff" * (0x320000 + len(seed)))
+        with self.assertRaisesRegex(ValueError, "reset request"):
+            VERIFY.verify_install_payload(bytes(raw))
+        raw[0x320000:] = seed
+        VERIFY.verify_install_payload(bytes(raw))
+        raw[0x320000] = ord("X")
+        with self.assertRaisesRegex(ValueError, "reset request"):
+            VERIFY.verify_install_payload(bytes(raw))
 
     def test_rejects_bad_md5(self) -> None:
         raw = bytearray(sample_table())

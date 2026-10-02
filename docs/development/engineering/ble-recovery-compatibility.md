@@ -9,6 +9,14 @@
 > only; automatic release publishing is disabled. See the root README.
 > The baseline workflow described below is retained as template reference.
 
+The FMO complete package also carries `fmo_install.bin` at `0x320000` in the
+`fmo_install` data partition, with a fresh-install reset request. The legacy
+`pdk_cache` partition at `0x310000` (64 KB) remains visible for cleanup. FMO erases
+application data before networking and commits the reset marker last; `cardid`
+and Recovery are excluded. The verifier requires both layout and reset payload.
+An app-only flash does not provide same-binary reinstall semantics.
+
+
 # Mini-Program BLE Firmware Compatibility
 
 This repository is a derivative-firmware template. Every application built from

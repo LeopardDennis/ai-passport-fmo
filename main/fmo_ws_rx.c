@@ -32,6 +32,7 @@ fmo_rx_result_t fmo_ws_rx_feed(fmo_ws_rx_t *rx, uint8_t opcode, bool fin,
     if (!rx->active || offset != rx->frame_offset || frame_length != rx->frame_length ||
         opcode != rx->opcode || fin != rx->fin ||
         length > sizeof(rx->text) - 1 - rx->length) goto invalid;
+    if (length && memchr(data, 0, length)) goto invalid;
     if (length) memcpy(rx->text + rx->length, data, length);
     rx->length += length;
     rx->frame_offset += length;

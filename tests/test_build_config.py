@@ -23,7 +23,7 @@ class BuildConfigTests(unittest.TestCase):
                 (root / "bin").mkdir()
                 for name in ("validate.sh", "check_fmo_config.py"):
                     shutil.copy(ROOT / "tools" / name, root / "tools" / name)
-                configuration = 'CONFIG_FMO_WIFI_SSID="private-build-test"\nCONFIG_FMO_HOST="192.0.2.9"\n'
+                configuration = 'CONFIG_FMO_WIFI_SSID="private-build-test"\nCONFIG_FMO_HOST="192.0.2.9"\nCONFIG_LV_FONT_FMT_TXT_LARGE=y\n'
                 (root / "sdkconfig").write_text(configuration)
                 probe = root / "bin" / "idf.py"
                 probe.write_text("#!" + os.sys.executable + "\n" +
@@ -40,7 +40,8 @@ class BuildConfigTests(unittest.TestCase):
                 recorded = json.loads((root / "probe.json").read_text())
                 self.assertEqual((root / "sdkconfig").read_text(), configuration)
                 if mode == "--configured":
-                    self.assertEqual(recorded["config"], configuration)
+                    self.assertEqual(recorded["config"], configuration.replace("CONFIG_LV_FONT_FMT_TXT_LARGE=y",
+                        "# CONFIG_LV_FONT_FMT_TXT_LARGE is not set"))
                     self.assertNotIn("sdkconfig.network", recorded["defaults"])
                 elif mode == "--firmware":
                     self.assertIsNone(recorded["config"])

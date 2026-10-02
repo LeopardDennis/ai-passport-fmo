@@ -4,7 +4,7 @@
 
 # FMO Live Monitor for AI Passport
 
-This firmware turns a FoloToy AI Passport into a small always-on status display
+This firmware turns a FoloToy AI Passport into a small connected status display
 for a local FMO (NFM Over Internet) device. It shows the selected FMO channel,
 the callsign currently speaking, the last-heard callsign while idle, grid/host
 metadata when available, connection state, and battery level.
@@ -46,7 +46,7 @@ ctest --test-dir /tmp/fmo-ui-preview --output-on-failure
 /tmp/fmo-ui-preview/fmo_ui_preview onair /tmp/fmo-onair.ppm
 ```
 
-Other preview states are `lastheard`, `offline`, `setup`, `long`, and `error`.
+Other preview states are `lastheard`, `offline`, `setup` (QR), `setup_info` (credentials), `network`, `long`, and `error`.
 
 Up to five verified Wi-Fi networks are saved. The previous single-network format
 is imported automatically. Updating an existing SSID replaces its password only
@@ -54,7 +54,7 @@ after a successful connection; a sixth distinct network is rejected until one
 is deleted. The setup page lists saved SSIDs (never passwords), provides explicit
 deletion with confirmation, and has a finish button to exit without adding a
 network. Deleting all entries keeps setup available and does not restore legacy
-credentials. Use long OK again to add another network after provisioning.
+credentials. Open Wi-Fi setup from the network menu to add another network after provisioning.
 
 Boot tries the last successful network first. While disconnected, each connection
 attempt gets up to 25 seconds, followed by other saved networks ordered by scanned
@@ -78,13 +78,32 @@ rejoin it with the displayed password if the page stops responding.
 The firmware verifies Wi-Fi/DHCP for up to 25 seconds before saving credentials
 in its own `fmo_wifi` NVS namespace. It does not deliberately delete the previous
 credentials on failure. On success, the hotspot and HTTP server shut down and
-the monitor connects to `fmo.local:80` using mDNS resolution. Keep both devices on
+the monitor connects to the saved FMO target (default `fmo.local:80`, using mDNS resolution). Keep both devices on
 a LAN that allows multicast and communication between clients.
 
-Long-press **OK** during normal operation to reboot into setup; this also works
-when the saved router is unavailable. Existing credentials remain until a new
-connection succeeds. During setup, long-press OK is ignored. Power-cycle to retry
-a setup startup failure. There is no automatic captive-portal popup or assumption
+The setup page's **FMO address** form saves a hostname or IPv4 address and port,
+with `fmo.local:80` as the default. Saved values override build-time settings and
+take effect after setup finishes, without rebuilding. **Check port** uses a saved
+Wi-Fi profile to check DNS resolution and TCP reachability. Save a Wi-Fi profile
+first, then re-enter setup to check it. A reachable port does not prove WebSocket
+path or event compatibility; the monitor screen reports the final FMO status.
+A check neither saves new Wi-Fi credentials nor changes the saved FMO address.
+
+Network/setup startup failures retain the worker and retry every five seconds;
+the network menu's retry interrupts the wait. Partial initialization unregisters
+event handlers and releases Wi-Fi resources, and recovery clears the error.
+Installation cleanup failures continue retrying without enabling networking;
+identity and Recovery remain protected.
+
+Long-press **OK** to open the network menu. Use UP/DOWN to select **Wi-Fi setup**,
+**Retry Wi-Fi**, or **Return to monitor**, then click OK. Long OK returns. Setup
+restarts into the QR screen; it remains available when the old router is offline.
+Retry immediately tries saved networks, without disconnecting a healthy link.
+During setup, click OK to switch between the connection QR and the hotspot name
+and password. Scan with your phone camera to join, or connect manually using the
+displayed credentials. Long OK cancels setup, closes the hotspot, and restores
+the current saved network list without persisting an unverified password or
+restoring networks deleted on the web page. Startup failures retry automatically and remain accessible from the network menu. There is no automatic captive-portal popup or assumption
 of shared credentials with other Passport firmware. The setup page is reachable
 only through the setup AP, uses a per-session token, and never returns the saved
 Wi-Fi password. Credentials are stored in ordinary NVS, not encrypted storage.
@@ -107,12 +126,40 @@ The installable merged image is
 partitions intact. Prefer the AI Passport mini-program installer on a provisioned
 device; never erase the full flash of a provisioned device.
 
+## Fresh-install data reset
+
+Installing the complete FMO package clears all application data on its first
+boot: saved Wi-Fi networks/passwords, previous FMO settings, and PDKPASS calendar,
+standings, results, reminders and switches. This also applies when reinstalling
+the same version. Ordinary power cycles and long-OK Wi-Fi setup keep the current
+installation's data. Device identity and permanent Recovery are preserved.
+
+The package includes a reset request in `fmo_install`; cleanup completes before
+NVS/Wi-Fi initialization and only then records the active image fingerprint.
+Interrupted cleanup is retried on boot; errors prevent networking with old data.
+`pdk_cache` remains declared solely to erase the legacy cache safely. Use the
+complete package: flashing only the application omits the fresh-install request
+and cannot reliably identify a reinstall of the same binary.
+
 ## Controls
 
 - **UP**: increase backlight brightness by 10%.
 - **DOWN**: decrease backlight brightness by 10%.
 - **OK**: refresh the current FMO channel immediately.
-- **Long OK**: restart into Wi-Fi setup without deleting existing credentials.
+- **Long OK**: open the network menu; UP/DOWN selects, click OK executes, long OK returns.
+- **Setup click OK**: switch QR/credentials; long OK cancels to the network menu.
+
+## Idle display and wake-up
+
+With no speech or button activity, the screen dims to at most 20% after 30 seconds
+and switches off after 90 seconds. The LCD enters panel sleep and its refresh
+pauses; Wi-Fi, both FMO connections, and button scanning remain active. A valid
+speech-start event or any button wakes it. The first button gesture only wakes
+the screen, including a long press; use the next gesture for the usual controls.
+Continuous speech, the network menu, and Wi-Fi setup keep the screen awake. Wake-up redraws the
+latest state before restoring brightness and refreshes the battery reading.
+Battery polling pauses while the screen is off. This is display power saving,
+not MCU deep sleep; battery-life improvements require measurement on hardware.
 
 ## FMO compatibility
 
@@ -132,14 +179,26 @@ private keys, or unsanitized logs.
   host/grid metadata, and last-heard transitions.
 - Leave both devices running through a Wi-Fi interruption and confirm automatic
   reconnection.
-- Check USB logs, minimum free heap, button response, display clipping, and
-  battery display on the physical board.
+- Confirm 30-second dimming, 90-second screen-off, button and speech wake-up,
+  and uninterrupted FMO connections while the screen is off.
+- Check USB logs, minimum free heap, largest allocation, task stack headroom,
+  button response, display clipping and battery display on the physical board.
+- Measure bright/dim/dark current before adjusting polling or stack allocations.
+- Verify saved FMO addresses, LAN access, port checks and menu retry after startup failure.
 
 
 ## Reliability and resource use
 
+- Channel queries that time out after two seconds or are partially sent recreate the control client before another query. The protocol has no request IDs, so old replies cannot inherit a new query's speaker revision.
+- Split the font losslessly into two fallback fonts with compact glyph descriptors; preserve all existing characters and rendered pixels.
+
 - State is reduced under a mutex and sent as a one-slot snapshot. The UI always
   receives the latest result, even when it cannot consume every PTT transition.
+- Chinese channel names are retained as UTF-8. Bounded copies truncate only at
+  character boundaries; invalid text falls back to the channel UID.
+- Invalid JSON, malformed/overlong callsign or grid fields, and raw or JSON-escaped NUL clear live
+  speech and require a fresh channel query. Replies predating a new speaker do
+  not erase that speaker or restore an unconfirmed channel.
 - Both abnormal disconnects and clean CLOSE handshakes reconnect. Failed client
   creation is retried while Wi-Fi is available.
 - Channel queries run every second and after a new talker. Until confirmation,
@@ -172,3 +231,7 @@ your Wi-Fi settings: do not publish it. CI artifacts contain dummy settings only
 
 The project derives from [FoloToy/ai-passport](https://github.com/FoloToy/ai-passport).
 Interface reference: [FMO web client API](https://github.com/niufox/fmo-mobile-controller/blob/main/API_DOCUMENTATION_v2.md).
+
+Private builds normalize `LV_FONT_FMT_TXT_LARGE` only in their temporary config
+copy, preserving the original. Existing configurations used with `idf.py build`
+must disable that option to match the compact font.

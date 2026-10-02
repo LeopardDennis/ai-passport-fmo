@@ -6,6 +6,28 @@
 
 ## Unreleased
 
+- Recreate the FMO control connection on query timeout/partial sends so delayed replies cannot inherit a newer query. Retain the network worker through startup failures, clean up partial Wi-Fi initialization and support immediate menu retry.
+- Reject JSON-escaped NUL and overlong callsign/grid identifiers. Add controlled-clock query, startup-recovery and setup endpoint fault tests.
+- Add saved FMO hostname/IPv4 and port settings to setup, plus a worker-owned DNS/TCP port check using saved Wi-Fi. Keep session-token/AP access restrictions and distinguish port reachability from API compatibility.
+- Split the existing font losslessly into compact fallback fonts, preserving every existing glyph and bitmap without partition changes. Normalize only private temporary build configs and verify identical framebuffers and glyph coverage.
+
+- Balance the visible spacing above and below the setup connection QR.
+
+- Add a PDKPASS-style network menu (setup above retry), a Wi-Fi connection QR with click-OK credential view, immediate saved-network retry, and cancellable setup that restores only the current saved profiles. Cover controls, QR escaping, display wake behavior, and native rendering within the firmware memory budget.
+- Reset all application data after each complete firmware installation, including
+  reinstalling the same binary: clear saved Wi-Fi/FMO settings and legacy PDKPASS
+  caches/reminders. Preserve identity/Recovery and same-installation reboot data.
+  Package a reset request and commit the image marker only after cleanup succeeds;
+  interrupted cleanup retries before networking. Verify the resource payload.
+
+- Preserve Chinese channel names with validated UTF-8 and whole-character
+  truncation. Discard malformed live messages safely and prevent stale channel
+  replies from erasing a newer speaker.
+- Dim the screen after 30 idle seconds and sleep the LCD after 90 seconds.
+  Keep FMO networking and button scanning active; speech or a consumed first
+  button gesture wakes and redraws the screen. Keep setup and continuous speech
+  awake, pause battery polling while dark, and retry failed panel transitions.
+
 - Move the setup hotspot to `192.168.9.1/24` to avoid common home-LAN overlap.
   Wait for the Wi-Fi station stop event before testing another credential so
   late events from an earlier attempt cannot validate the new one. Log LVGL

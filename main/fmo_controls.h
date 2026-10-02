@@ -1,0 +1,14 @@
+#pragma once
+#include <stdbool.h>
+typedef enum { FMO_VIEW_MONITOR, FMO_VIEW_NETWORK, FMO_VIEW_SETUP } fmo_view_t;
+typedef enum { FMO_KEY_UP, FMO_KEY_DOWN, FMO_KEY_OK, FMO_KEY_BACK } fmo_key_t;
+typedef enum { FMO_ACTION_NONE, FMO_ACTION_BRIGHTER, FMO_ACTION_DIMMER,
+    FMO_ACTION_REFRESH, FMO_ACTION_SETUP, FMO_ACTION_RETRY, FMO_ACTION_CANCEL } fmo_action_t;
+typedef struct {
+    fmo_view_t view;
+    unsigned selection;
+    bool setup_info;
+    bool hotspot_active;
+} fmo_controls_t;
+void fmo_controls_observe_setup(fmo_controls_t *controls, bool active);
+fmo_action_t fmo_controls_key(fmo_controls_t *controls, fmo_key_t key);

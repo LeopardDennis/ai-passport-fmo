@@ -10,3 +10,8 @@ idf_build_set_property(
     APPEND)
 
 project(FoloToy-AI-Passport)
+
+# Include the reset request as a resource in USB and community installation.
+# Reinstalling the same binary rewrites this seed; normal reboots leave it alone.
+file(WRITE "${CMAKE_BINARY_DIR}/fmo_install.bin" "FMO_RESET_ON_INSTALL_V1\n")
+esptool_py_flash_to_partition(flash "fmo_install" "${CMAKE_BINARY_DIR}/fmo_install.bin")

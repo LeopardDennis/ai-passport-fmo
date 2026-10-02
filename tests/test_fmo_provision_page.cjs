@@ -13,11 +13,11 @@ const first = source.match(/static const char page\[\] =([\s\S]*?);\nstatic cons
 const prefix = [...first.matchAll(/^"(?:[^"\\]|\\.)*"/gm)].map(m => JSON.parse(m[0])).join('');
 const script = (prefix + 'test-token' + literal('page_end')).match(/<script>([\s\S]*?)<\/script>/)[1];
 function element() { return {value:'',textContent:'',disabled:false,children:[],append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}; }
-const nodes = Object.fromEntries(['form','ssid','pass','net','save','result','saved','finish'].map(k => [k,element()]));
+const nodes = Object.fromEntries(['form','ssid','pass','net','save','result','saved','finish','host','port','fmoform','fmosave','fmotest'].map(k => [k,element()]));
 let names = ['<img src=x onerror=alert(1)>','Home'], status = 6, sent;
 const context = vm.createContext({document:{getElementById:id=>nodes[id],createElement:element},confirm:()=>true,setTimeout:()=>{},fetch:async(url,options)=>{
-  if(url==='/configure')sent=options;
-  return {ok:true,json:async()=>url==='/saved'?names:url==='/networks'?[]:status};
+  if(options?.method==='POST')sent={...options,url};
+  return {ok:true,json:async()=>url==='/saved'?names:url==='/networks'?[]:url==='/fmo'?{host:'fmo.local',port:80}:status};
 }});
 const flush = async()=>{for(let i=0;i<15;i++)await Promise.resolve()};
 (async()=>{
@@ -34,6 +34,19 @@ const flush = async()=>{for(let i=0;i<15;i++)await Promise.resolve()};
   assert.equal(nodes.saved.children.length,0);assert.equal(nodes.finish.disabled,true);
   status=3;nodes.pass.value='secret';await vm.runInContext('poll()',context);
   assert.equal(nodes.pass.value,'');
+  assert.equal(nodes.host.value,'fmo.local');
+  nodes.host.value='192.168.1.2';nodes.port.value='8080';
+  status=11;nodes.fmoform.onsubmit({preventDefault(){}});await flush();
+  assert.equal(sent.url,'/fmo');
+  assert.deepEqual(JSON.parse(sent.body),{host:'192.168.1.2',port:8080,probe:false});
+  assert.equal(sent.headers['X-Setup-Token'],'test-token');
+  assert.match(nodes.result.textContent,/地址已保存/);
+  status=13;nodes.fmotest.onclick();await flush();
+  assert.equal(JSON.parse(sent.body).probe,true);
+  assert.match(nodes.result.textContent,/端口可达/);
+  for(const [code,expected] of [[12,/Wi-Fi 尚未连接/],[14,/连接失败/]]){
+    status=code;await vm.runInContext('poll()',context);assert.match(nodes.result.textContent,expected);
+  }
   for (const [code, expected] of [[7,/认证失败/],[8,/未找到/],[9,/安全模式/],[10,/获取 IP 超时/]]) {
     status=code;await vm.runInContext('poll()',context);
     assert.match(nodes.result.textContent,expected);

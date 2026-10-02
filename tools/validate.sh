@@ -29,12 +29,33 @@ run_static_checks() {
         -o "${test_dir}/test_ui_pixel_math"
     "${test_dir}/test_ui_pixel_math"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_fmo_monitor_state.c main/fmo_monitor_state.c \
+        tests/test_fmo_monitor_state.c main/fmo_monitor_state.c main/fmo_text.c \
         -o "${test_dir}/test_fmo_monitor_state"
     "${test_dir}/test_fmo_monitor_state"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_fmo_ws_rx.c main/fmo_ws_rx.c -o "${test_dir}/test_fmo_ws_rx"
     "${test_dir}/test_fmo_ws_rx"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_fmo_text.c main/fmo_text.c main/fmo_monitor_state.c -o "${test_dir}/test_fmo_text"
+    "${test_dir}/test_fmo_text"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_fmo_display_policy.c main/fmo_display_policy.c -o "${test_dir}/test_fmo_display_policy"
+    "${test_dir}/test_fmo_display_policy"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_fmo_storage_policy.c main/fmo_storage_policy.c -o "${test_dir}/test_fmo_storage_policy"
+    "${test_dir}/test_fmo_storage_policy"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_fmo_controls.c main/fmo_controls.c main/fmo_wifi_qr.c -o "${test_dir}/test_fmo_controls"
+    "${test_dir}/test_fmo_controls"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_fmo_endpoint.c main/fmo_endpoint.c -o "${test_dir}/test_fmo_endpoint"
+    "${test_dir}/test_fmo_endpoint"
+    python3 tests/test_compact_font.py
+    python3 tests/test_fmo_storage.py
+    python3 tests/test_fmo_display_runtime.py
+    python3 tests/test_fmo_provision_runtime.py
+    python3 tests/test_fmo_network.py
+    python3 tests/test_fmo_endpoint_runtime.py
     python3 tests/test_build_config.py
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_fmo_credentials.c main/fmo_credentials.c -o "${test_dir}/test_fmo_credentials"
@@ -65,6 +86,16 @@ run_firmware_checks() (
     if [[ "${mode}" == "--configured" ]]; then
         python3 tools/check_fmo_config.py "${repo_root}/sdkconfig"
         install -m 0600 "${repo_root}/sdkconfig" "${validation_build_dir}/sdkconfig"
+        # The compact font ABI requires the small descriptor in every mode.
+        # Normalize only the private temporary copy; retain the user's config.
+        python3 - "${validation_build_dir}/sdkconfig" <<'PYCONFIG'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text().replace("CONFIG_LV_FONT_FMT_TXT_LARGE=y",
+                                "# CONFIG_LV_FONT_FMT_TXT_LARGE is not set")
+path.write_text(text)
+PYCONFIG
         config_defaults="${repo_root}/sdkconfig.defaults"
         output_dir="${repo_root}/build"
     fi
@@ -73,9 +104,12 @@ run_firmware_checks() (
         output_dir="${repo_root}/build"
     fi
 
-    SDKCONFIG_DEFAULTS="${config_defaults}" \
+    # Validate pinned dependencies without resolving optional newer versions.
+    IDF_COMPONENT_CHECK_NEW_VERSION=0 SDKCONFIG_DEFAULTS="${config_defaults}" \
         idf.py -B "${validation_build_dir}" \
         -D "SDKCONFIG=${validation_build_dir}/sdkconfig" build
+    FMO_REQUIRE_NETWORK_TEST=1 python3 tests/test_fmo_network.py
+    FMO_REQUIRE_NETWORK_TEST=1 python3 tests/test_fmo_endpoint_runtime.py
     idf.py -B "${validation_build_dir}" merge-bin \
         -o "${validation_build_dir}/FoloToy-AI-Passport-full.bin"
     python3 tools/verify_firmware.py "${validation_build_dir}"

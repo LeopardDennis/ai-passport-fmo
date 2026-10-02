@@ -63,6 +63,9 @@ int main(int argc, char **argv)
 {
     lv_init();
     lv_font_glyph_dsc_t glyph;
+    // Verify every existing CJK codepoint, including the compact font's fallback segment.
+    for (uint32_t code = 0x4e00; code < 0x9ff0; ++code)
+        assert(lv_font_get_glyph_dsc(&fmo_channel_font, &glyph, code, 0) && !glyph.is_placeholder);
     assert(lv_font_get_glyph_dsc(&fmo_channel_font, &glyph, 0x5409, 0) && !glyph.is_placeholder);
     assert(lv_font_get_glyph_dsc(&fmo_channel_font, &glyph, 0x7EE7, 0) && !glyph.is_placeholder);
     lv_display_t *display = lv_display_create(240, 320);
@@ -70,19 +73,22 @@ int main(int argc, char **argv)
     lv_display_set_buffers(display, buffer, NULL, sizeof(buffer), LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(display, flush);
     fmo_ui_create();
+    fmo_controls_t controls = {0};
     fmo_monitor_state_t state = {.wifi_connected=true, .events_connected=true,
         .control_connected=true, .channel_valid=true, .speaking=true,
-        .channel_uid=42, .speaker="BG5ESN", .last_speaker="BG5ESN", .channel_name="安吉FMO中继"};
-    fmo_ui_render(&state, "", "", "", 82, 12000, false);
+        .channel_uid=42, .speaker="BG5ESN", .last_speaker="BG5ESN"};
+    fmo_monitor_set_channel(&state, 42, "安吉FMO中继");
+    fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
+    assert(find_text(lv_screen_active(), "安吉FMO中继"));
     verify("BG5ESN", 0xFF8A00);
     state.speaking = false;
-    fmo_ui_render(&state, "", "", "", -1, 12000, false);
+    fmo_ui_render(&state, "", "", "", -1, 12000, false, &controls);
     verify("BG5ESN", 0xF4F4F4);
     assert(find_text(lv_screen_active(), "--"));
     assert(!find_text(lv_screen_active(), "BAT --"));
-    fmo_ui_render(&state, "", "", "", 15, 12000, false);
+    fmo_ui_render(&state, "", "", "", 15, 12000, false, &controls);
     verify("15", 0xF4F4F4);
-    fmo_ui_render(&state, "", "", "", 100, 12000, false);
+    fmo_ui_render(&state, "", "", "", 100, 12000, false, &controls);
     verify("100", 0x000000);
     lv_obj_t *percent = find_text(lv_screen_active(), "100");
     lv_point_t number_size;
@@ -90,23 +96,48 @@ int main(int argc, char **argv)
                      0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     assert(number_size.x <= 30); /* All three digits fit the compact battery. */
     state.events_connected = false;
-    fmo_ui_render(&state, "", "", "", 82, 12000, false);
+    fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     assert(!find_text(lv_screen_active(), "BG5ESN"));
-    fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false);
+    fmo_controls_observe_setup(&controls, true);
+    controls.setup_info = true;
+    fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
     verify("ABCDEF012345", 0xF4F4F4);
-    assert(find_text(lv_screen_active(), "打开 192.168.9.1"));
+    assert(find_text(lv_screen_active(), "192.168.9.1"));
+    /* Repeated view changes must release the QR canvas and overlay labels. */
+    for (unsigned i = 0; i < 20; ++i) {
+        controls.setup_info = false;
+        fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
+        lv_refr_now(display);
+        assert(find_text(lv_screen_active(), "扫码连接配网热点"));
+        controls.setup_info = true;
+        fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
+        fmo_controls_observe_setup(&controls, false);
+        fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
+        fmo_controls_observe_setup(&controls, true);
+    }
+    fmo_controls_observe_setup(&controls, false);
     const char *ssid = "", *password = "", *error = "";
     state.events_connected = true;
     state.speaking = argc < 2 || !strcmp(argv[1], "onair");
-    if (argc > 1 && !strcmp(argv[1], "setup")) {ssid="FMO-Setup-TEST"; password="ABCDEF012345";}
+    if (argc > 1 && (!strcmp(argv[1], "setup") || !strcmp(argv[1], "setup_info"))) {
+        ssid="FMO-Setup-TEST"; password="ABCDEF012345";
+        fmo_controls_observe_setup(&controls, true);
+        controls.setup_info = !strcmp(argv[1], "setup_info");
+    }
+    if (argc > 1 && !strcmp(argv[1], "network")) {
+        controls.view = FMO_VIEW_NETWORK;
+    }
     if (argc > 1 && !strcmp(argv[1], "offline")) state.wifi_connected = state.channel_valid = false;
+    if (argc > 1 && !strcmp(argv[1], "rare")) fmo_monitor_set_channel(&state, 42, "龍龠龯");
     if (argc > 1 && !strcmp(argv[1], "long")) strcpy(state.last_speaker, "BG5ESN/12345678");
     if (argc > 1 && !strcmp(argv[1], "error")) error="NETWORK START FAILED";
-    fmo_ui_render(&state, error, ssid, password, 82, 12000, false);
+    fmo_ui_render(&state, error, ssid, password, 82, 12000, false, &controls);
     lv_obj_update_layout(lv_screen_active());
     lv_refr_now(display);
-    verify_channel_center();
-    verify_callsign_center();
+    if (controls.view == FMO_VIEW_MONITOR) {
+        verify_channel_center();
+        verify_callsign_center();
+    }
     lv_mem_monitor_t memory;
     lv_mem_monitor(&memory);
     assert(memory.free_biggest_size >= 4096); /* Leave room for later LVGL redraws. */

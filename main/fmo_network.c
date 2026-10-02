@@ -7,6 +7,8 @@
 
 #include "demo_radio.h"
 #include "fmo_ws_rx.h"
+#include "fmo_text.h"
+#include "fmo_storage.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "freertos/semphr.h"
@@ -27,6 +29,7 @@ static const char *TAG = "fmo_network";
 static atomic_bool s_reconnect;
 static atomic_bool s_setup_requested;
 static atomic_bool s_setup_active;
+static atomic_bool s_retry_requested;
 
 #define FMO_CHANNEL_REFRESH_MS 1000
 #define FMO_CHANNEL_MAX_AGE_MS 5000
@@ -59,6 +62,10 @@ static uint64_t now_ms(void)
 }
 static EventGroupHandle_t s_wifi_bits;
 static TaskHandle_t s_network_task;
+static esp_netif_t *s_station;
+static bool s_wifi_initialized;
+static esp_event_handler_instance_t s_wifi_handler;
+static esp_event_handler_instance_t s_ip_handler;
 static fmo_socket_t s_events_socket = { .kind = FMO_SOCKET_EVENTS };
 static fmo_socket_t s_control_socket = { .kind = FMO_SOCKET_CONTROL };
 
@@ -86,9 +93,11 @@ static void post_update(const fmo_update_t *update)
         break;
     case FMO_UPDATE_CHANNEL:
         if (s_query_pending && state->wifi_connected && state->control_connected) {
-            fmo_monitor_set_channel(state, update->uid, update->text);
-            state->channel_confirmed_ms = now_ms();
-            if (s_query_revision != s_speaker_revision) {
+            if (s_query_revision == s_speaker_revision) {
+                fmo_monitor_set_channel(state, update->uid, update->text);
+                state->channel_confirmed_ms = now_ms();
+            } else {
+                // An older reply must not erase a newer speaker on UID change.
                 fmo_monitor_invalidate_channel(state);
                 refresh = true;
             }
@@ -97,6 +106,7 @@ static void post_update(const fmo_update_t *update)
         break;
     case FMO_UPDATE_SPEAKER:
         if (state->wifi_connected && state->events_connected) {
+            if (update->speaking) ++s_snapshot.speech_activity;
             if (update->speaking &&
                 (!state->speaking || strcmp(state->speaker, update->callsign) != 0)) {
                 ++s_speaker_revision;
@@ -134,38 +144,57 @@ static bool json_bool(const cJSON *item)
     return cJSON_IsTrue(item) || (cJSON_IsNumber(item) && item->valueint != 0);
 }
 
-static void copy_ascii(char *destination, size_t destination_size,
-                       const char *source)
+static bool copy_ascii(char *destination, size_t capacity, const char *source)
 {
-    if (!destination || destination_size == 0) return;
+    if (!destination || !capacity) return false;
     destination[0] = '\0';
-    if (!source) return;
+    if (!source || strlen(source) >= capacity) return false;
+    for (const unsigned char *p = (const unsigned char *)source; *p; ++p)
+        if (*p < 0x20 || *p > 0x7e) return false;
+    memcpy(destination, source, strlen(source) + 1);
+    return true;
+}
 
-    size_t output = 0;
-    for (size_t i = 0; source[i] != '\0' && output + 1 < destination_size; i++) {
-        unsigned char value = (unsigned char)source[i];
-        if (value < 0x20 || value > 0x7e) {
-            destination[0] = '\0';
-            return;
-        }
-        destination[output++] = (char)value;
-    }
-    destination[output] = '\0';
+/* A lost/invalid PTT release must not leave a permanently live callsign. */
+static void invalidate_live_message(void)
+{
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    s_snapshot.state.speaking = false;
+    s_snapshot.state.speaker[0] = '\0';
+    s_snapshot.state.speaker_is_host = false;
+    ++s_speaker_revision;
+    // Keep an outstanding query owned by this connection. Its old speaker
+    // revision will reject the reply; timeout will drain the client if needed.
+    fmo_monitor_invalidate_channel(&s_snapshot.state);
+    xQueueOverwrite(s_update_queue, &s_snapshot);
+    xSemaphoreGive(s_state_lock);
+    fmo_network_request_refresh();
 }
 
 static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
 {
-    cJSON *root = cJSON_Parse(payload);
+    cJSON *root = fmo_text_json_has_nul(payload) ? NULL :
+        cJSON_ParseWithOpts(payload, NULL, true);
     if (!root) {
         ESP_LOGW(TAG, "Ignored invalid JSON from %s socket",
                  kind == FMO_SOCKET_EVENTS ? "events" : "control");
+        invalidate_live_message();
         return;
     }
 
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
     const cJSON *sub_type = cJSON_GetObjectItemCaseSensitive(root, "subType");
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
-    if (!cJSON_IsString(type) || !cJSON_IsString(sub_type) || !cJSON_IsObject(data)) {
+    if (!cJSON_IsString(type) || !cJSON_IsString(sub_type)) {
+        cJSON_Delete(root);
+        return;
+    }
+    if (!cJSON_IsObject(data)) {
+        if ((kind == FMO_SOCKET_EVENTS && strcmp(type->valuestring, "qso") == 0 &&
+             strcmp(sub_type->valuestring, "callsign") == 0) ||
+            (kind == FMO_SOCKET_CONTROL && strcmp(type->valuestring, "station") == 0 &&
+             strcmp(sub_type->valuestring, "getCurrentResponse") == 0))
+            invalidate_live_message();
         cJSON_Delete(root);
         return;
     }
@@ -184,12 +213,15 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
                 .speaking = json_bool(speaking),
                 .is_host = json_bool(is_host),
             };
-            copy_ascii(update.callsign, sizeof(update.callsign), callsign->valuestring);
-            if (cJSON_IsString(grid)) {
+            bool valid = copy_ascii(update.callsign, sizeof(update.callsign), callsign->valuestring) &&
+                         update.callsign[0];
+            if (grid && !cJSON_IsNull(grid)) valid = valid && cJSON_IsString(grid) &&
                 copy_ascii(update.grid, sizeof(update.grid), grid->valuestring);
-            }
-            if (update.callsign[0] != '\0') post_update(&update);
-        }
+            if (is_host) valid = valid && (cJSON_IsBool(is_host) || (cJSON_IsNumber(is_host) &&
+                (is_host->valuedouble == 0 || is_host->valuedouble == 1)));
+            if (valid) post_update(&update);
+            else invalidate_live_message();
+        } else invalidate_live_message();
     } else if (kind == FMO_SOCKET_CONTROL && strcmp(type->valuestring, "station") == 0 &&
                strcmp(sub_type->valuestring, "getCurrentResponse") == 0) {
         const cJSON *uid = cJSON_GetObjectItemCaseSensitive(data, "uid");
@@ -200,7 +232,7 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
             uid->valuedouble == (uint32_t)uid->valuedouble) {
             update.uid = (uint32_t)uid->valuedouble;
         }
-        if (cJSON_IsString(name)) copy_ascii(update.text, sizeof(update.text), name->valuestring);
+        if (cJSON_IsString(name)) fmo_text_copy_utf8(update.text, sizeof(update.text), name->valuestring);
         if (update.uid) post_update(&update);
     }
 
@@ -227,28 +259,30 @@ static void receive_fragment(fmo_socket_t *socket,
     } else if (result == FMO_RX_INVALID) {
         reset_rx(socket);
         /* Discarding a message can lose a PTT release: stop claiming live state. */
-        xSemaphoreTake(s_state_lock, portMAX_DELAY);
-        s_snapshot.state.speaking = false;
-        s_snapshot.state.speaker[0] = '\0';
-        fmo_monitor_invalidate_channel(&s_snapshot.state);
-        xQueueOverwrite(s_update_queue, &s_snapshot);
-        xSemaphoreGive(s_state_lock);
-        fmo_network_request_refresh();
+        invalidate_live_message();
         ESP_LOGW(TAG, "Dropped invalid or oversized WebSocket message");
     }
 }
 
 /* Only the coordinator sends queries. Socket callbacks merely notify it. */
-static void request_current_channel(void)
+static bool request_current_channel(void)
 {
     if (!s_control_socket.client ||
-        !esp_websocket_client_is_connected(s_control_socket.client)) return;
+        !esp_websocket_client_is_connected(s_control_socket.client)) return false;
     static const char request[] =
         "{\"type\":\"station\",\"subType\":\"getCurrent\",\"data\":{}}";
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
-    if (s_query_pending && now_ms() - s_query_ms < 2000) {
+    if (s_query_pending) {
+        bool expired = now_ms() - s_query_ms >= 2000;
+        if (expired) {
+            // The protocol has no request ID. Drain this client before sending
+            // another query so a delayed reply cannot inherit new metadata.
+            s_query_pending = false;
+            fmo_monitor_set_control(&s_snapshot.state, false);
+            xQueueOverwrite(s_update_queue, &s_snapshot);
+        }
         xSemaphoreGive(s_state_lock);
-        return;
+        return expired;
     }
     s_query_pending = true;
     s_query_ms = now_ms();
@@ -262,7 +296,9 @@ static void request_current_channel(void)
         fmo_monitor_invalidate_channel(&s_snapshot.state);
         xQueueOverwrite(s_update_queue, &s_snapshot);
         xSemaphoreGive(s_state_lock);
+        return true; // A partially sent query also has ambiguous reply ownership.
     }
+    return false;
 }
 
 static void websocket_event(void *handler_args, esp_event_base_t event_base,
@@ -372,16 +408,18 @@ static esp_err_t start_wifi(void)
     err = demo_radio_network_prepare();
     if (err != ESP_OK) return err;
 
-    if (!esp_netif_create_default_wifi_sta()) return ESP_ERR_NO_MEM;
+    s_station = esp_netif_create_default_wifi_sta();
+    if (!s_station) return ESP_ERR_NO_MEM;
 
     wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&init_config);
     if (err != ESP_OK) return err;
-    err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                     wifi_event, NULL);
+    s_wifi_initialized = true;
+    err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                               wifi_event, NULL, &s_wifi_handler);
     if (err != ESP_OK) return err;
-    err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                     wifi_event, NULL);
+    err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                               wifi_event, NULL, &s_ip_handler);
     if (err != ESP_OK) return err;
 
     wifi_config_t wifi_config = { 0 };
@@ -429,6 +467,10 @@ static bool s_was_online;
 
 static void retry_wifi(void)
 {
+    if (atomic_exchange(&s_retry_requested, false)) {
+        s_tried_profiles = 0;
+        s_next_wifi_attempt = 0;
+    }
     if (xEventGroupGetBits(s_wifi_bits) & FMO_WIFI_READY_BIT) {
         if (!s_was_online) fmo_provision_remember_connected();
         s_was_online = true;
@@ -468,17 +510,63 @@ static void clear_dns_cache(void *unused)
     dns_clear_cache();
 }
 
+static void cleanup_wifi(void)
+{
+    atomic_store(&s_reconnect, false);
+    atomic_store(&s_setup_active, false);
+    if (s_wifi_handler) {
+        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_wifi_handler);
+        s_wifi_handler = NULL;
+    }
+    if (s_ip_handler) {
+        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_ip_handler);
+        s_ip_handler = NULL;
+    }
+    if (s_wifi_initialized) {
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        s_wifi_initialized = false;
+    }
+    if (s_station) {
+        esp_netif_destroy_default_wifi(s_station);
+        s_station = NULL;
+    }
+    xEventGroupClearBits(s_wifi_bits, FMO_WIFI_READY_BIT | FMO_WIFI_DISCONNECTED_BIT |
+                         FMO_WIFI_STOPPED_BIT | FMO_WIFI_CANCEL_BIT);
+    post_link(FMO_UPDATE_WIFI, false);
+}
+
+/* Keep the worker and menu requests alive through partial startup failures.
+ * Storage remains a fail-closed prerequisite for every network attempt. */
+static void prepare_network(void)
+{
+    for (;;) {
+        esp_err_t err = fmo_storage_prepare();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Installation cleanup failed: %s", esp_err_to_name(err));
+            post_error("DATA RESET FAILED");
+        } else {
+            check_setup_request();
+            err = start_wifi();
+            if (err == ESP_OK) {
+                post_error("");
+                atomic_store(&s_retry_requested, false);
+                return;
+            }
+            ESP_LOGE(TAG, "Wi-Fi/setup start failed: %s", esp_err_to_name(err));
+            cleanup_wifi();
+            post_error("WIFI START FAILED");
+        }
+        // A retry/setup notification interrupts the backoff immediately.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    }
+}
+
 static void network_task(void *argument)
 {
     (void)argument;
-    esp_err_t err = start_wifi();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Wi-Fi start failed: %s", esp_err_to_name(err));
-        post_error("WIFI START FAILED");
-        s_network_task = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
+    prepare_network();
+    esp_err_t err;
 
     s_tried_profiles = fmo_provision_preferred_mask();
     s_next_wifi_attempt = now_ms() + 25000;
@@ -487,12 +575,14 @@ static void network_task(void *argument)
         retry_wifi();
     }
 
+    fmo_endpoint_t endpoint;
+    fmo_provision_get_endpoint(&endpoint);
     char events_uri[160];
     char control_uri[160];
     int events_length = snprintf(events_uri, sizeof(events_uri), "ws://%s:%d/events",
-                                 CONFIG_FMO_HOST[0] ? CONFIG_FMO_HOST : "fmo.local", CONFIG_FMO_PORT);
+                                 endpoint.host, endpoint.port);
     int control_length = snprintf(control_uri, sizeof(control_uri), "ws://%s:%d/ws",
-                                  CONFIG_FMO_HOST[0] ? CONFIG_FMO_HOST : "fmo.local", CONFIG_FMO_PORT);
+                                  endpoint.host, endpoint.port);
     if (events_length < 0 || events_length >= (int)sizeof(events_uri) ||
         control_length < 0 || control_length >= (int)sizeof(control_uri)) {
         post_error("FMO HOST TOO LONG");
@@ -521,7 +611,7 @@ static void network_task(void *argument)
                 err = start_socket(&s_control_socket, control_uri);
                 if (err != ESP_OK) ESP_LOGW(TAG, "Control client creation failed; retrying");
             }
-            request_current_channel();
+            if (request_current_channel()) stop_socket(&s_control_socket);
         }
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
         if (s_snapshot.state.channel_valid &&
@@ -577,4 +667,16 @@ void fmo_network_request_setup(void)
     if (atomic_load(&s_setup_active)) return;
     atomic_store(&s_setup_requested, true);
     if (s_network_task) xTaskNotifyGive(s_network_task);
+}
+
+void fmo_network_request_retry(void)
+{
+    atomic_store(&s_retry_requested, true);
+    if (s_network_task) xTaskNotifyGive(s_network_task);
+}
+
+void fmo_network_cancel_setup(void)
+{
+    if (s_wifi_bits && atomic_load(&s_setup_active))
+        xEventGroupSetBits(s_wifi_bits, FMO_WIFI_CANCEL_BIT);
 }

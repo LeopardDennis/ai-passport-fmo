@@ -14,11 +14,19 @@ if(NOT FMO_POOL_LINE MATCHES "=([0-9]+)$")
 endif()
 math(EXPR FMO_POOL_BYTES "${CMAKE_MATCH_1} * 1024")
 target_compile_definitions(lvgl PUBLIC LV_MEM_SIZE=${FMO_POOL_BYTES})
-add_executable(fmo_ui_preview ../test_fmo_ui.c ../../main/fmo_ui.c ../../assets/fonts/fmo_channel_font.c)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(FMO_COMPACT_FONT "${CMAKE_CURRENT_BINARY_DIR}/fmo_channel_font_compact.c")
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/compact_font.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/fonts/fmo_channel_font.c" "${FMO_COMPACT_FONT}"
+    COMMAND_ERROR_IS_FATAL ANY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/compact_font.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/fonts/fmo_channel_font.c")
+add_executable(fmo_ui_preview ../test_fmo_ui.c ../../main/fmo_ui.c ../../main/fmo_controls.c ../../main/fmo_wifi_qr.c ../../main/fmo_monitor_state.c ../../main/fmo_text.c "${FMO_COMPACT_FONT}")
 target_include_directories(fmo_ui_preview PRIVATE ../../main)
 target_link_libraries(fmo_ui_preview PRIVATE lvgl m)
 enable_testing()
 add_test(NAME fmo_ui COMMAND fmo_ui_preview)
-foreach(state IN ITEMS lastheard offline setup long error)
+foreach(state IN ITEMS lastheard offline setup setup_info network long rare error)
     add_test(NAME fmo_ui_${state} COMMAND fmo_ui_preview ${state})
 endforeach()
