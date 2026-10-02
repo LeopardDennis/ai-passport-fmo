@@ -37,13 +37,34 @@ int main(void)
     assert(strcmp(state.last_speaker, "BG5ESN") == 0);
     assert(state.last_speaker_ms == 2000);
 
+    /* Unnamed idle releases end the current talker without invalidating the
+     * channel or overwriting last-heard metadata; duplicates do not reset age. */
+    const char *releases[] = {"", NULL, "BG5ESN"};
+    for (unsigned i = 0; i < sizeof(releases) / sizeof(releases[0]); ++i) {
+        fmo_monitor_apply_speaker(&state, "BG5ESN", "PM00AA", true, true, 2100);
+        fmo_monitor_apply_speaker(&state, releases[i], "", false, false, 2200);
+        assert(!state.speaking && !state.speaker[0] && state.channel_valid);
+        assert(state.channel_uid == 42 && !strcmp(state.last_speaker, "BG5ESN"));
+        assert(!strcmp(state.grid, "PM00AA") && state.speaker_is_host);
+        assert(state.last_speaker_ms == 2200);
+        fmo_monitor_apply_speaker(&state, releases[i], "", false, false, 2300);
+        assert(state.last_speaker_ms == 2200);
+    }
+    fmo_monitor_apply_speaker(&state, "", "", true, false, 2400);
+    assert(!state.speaking && state.last_speaker_ms == 2200);
+
     /* Losing the events channel clears live state but keeps last-heard data. */
     fmo_monitor_apply_speaker(&state, "BI1XYZ", "ON80", true, false, 3000);
     fmo_monitor_set_events(&state, false);
     assert(!state.speaking);
     assert(strcmp(state.last_speaker, "BI1XYZ") == 0);
 
+    strcpy(state.radio.device_name,"TEST RADIO");
+    strcpy(state.radio.antenna,"GP");
+    state.radio.frequency_100hz=4398750;
+    state.radio.antenna_height_m=63;state.radio.height_valid=true;
     fmo_monitor_set_wifi(&state, false);
+    assert(!state.radio.device_name[0] && !state.radio.frequency_100hz && !state.radio.height_valid);
     assert(!state.events_connected);
     assert(!state.control_connected);
     assert(!state.channel_valid);
@@ -55,10 +76,16 @@ int main(void)
     fmo_monitor_apply_speaker(&state, "BG5ESN", "PM00AA", true, false, 4000);
     fmo_monitor_set_channel(&state, 42, "RENAMED");
     assert(state.speaking); /* Same channel refresh must retain the speaker. */
+    strcpy(state.radio.device_name,"LOCAL RADIO");
+    state.radio.frequency_100hz=4398750;
     fmo_monitor_set_channel(&state, 43, "OTHER NET");
+    assert(!strcmp(state.radio.device_name,"LOCAL RADIO") && state.radio.frequency_100hz==4398750);
     assert(!state.speaking && state.speaker[0] == '\0');
     assert(state.last_speaker[0] == '\0' && state.grid[0] == '\0');
+    strcpy(state.radio.device_name,"OTHER RADIO");
+    state.radio.frequency_100hz=4398750;
     fmo_monitor_set_control(&state, false);
+    assert(!state.radio.device_name[0] && !state.radio.frequency_100hz);
     assert(!state.channel_valid);
     fmo_monitor_set_channel(&state, 43, "OTHER NET");
     fmo_monitor_invalidate_channel(&state);

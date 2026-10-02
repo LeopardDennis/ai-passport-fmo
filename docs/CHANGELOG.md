@@ -6,6 +6,26 @@
 
 ## Unreleased
 
+- Balance monitor spacing with a larger visible gap below the connection status, consistent channel/profile separation, and tighter speaker/footer alignment. Keep audio state, volume and the long-OK setup hint together; show refresh requests in the connection row. Verify active speech, last-heard, initial idle, errors and native memory/layout without rebuilding firmware.
+
+- Receive live conversation PCM from the FMO `/audio` WebSocket through the ES8311 speaker, with automatic 50% playback, bounded buffering, disconnect/mute cleanup, silent DMA priming and isolated failures. UP/DOWN adjusts volume, short OK toggles audio, long UP refreshes and long OK retains the network menu; show audio state/volume in the footer. Verify the live endpoint, PCM framing, worker lifecycle, controls and native UI; firmware and physical playback are not tested in this code-only update.
+
+- Center the clock on the screen and reclaim the hidden grid row for wider radio-profile line spacing, moving the callsign closer to the footer. Retain space for real setup, idle and error hints; validate native layout without rebuilding firmware.
+
+- Add a minute-resolution Beijing-time clock between FMO and battery. Synchronize asynchronously over SNTP after Wi-Fi connects, retain one service across reconnects, show `--:--` before valid time, and redraw the clock before wake-up. Verify minute/midnight transitions, unavailable time, reconnect initialization, UI layout and memory.
+
+- Hide speaker grid coordinates in both active-speech and last-heard views; retain the four-row radio configuration panel, bold callsigns and connection/setup error hints.
+
+- Add a portrait four-row radio configuration panel inspired by the supplied reference: device name, MHz frequency, antenna model and height in metres. Read local FMO physical configuration on connection and every 30 seconds; keep optional metadata independent of PTT/channel state, handle unset/invalid values and clear it on disconnect. Verify unit conversion, Chinese text, long rows, reconnects and native UI memory/layout.
+
+- Keep an already confirmed channel visible when speech starts or the talker changes; refresh the channel in the background. Discard pre-transition channel replies without blanking the UI or extending freshness. Preserve synchronization for unknown channels, disconnects and query failures; add parser regressions for repeated starts, short PTT and late replies.
+
+- Simplify monitor details to the grid without elapsed-time or station/host prefixes. Use licensed Montserrat Bold callsign glyphs at 32 px, with a 20 px bold fallback for long callsigns; retain regular setup-password text and verify native rendering.
+
+- Keep the confirmed channel and last-heard display after explicit PTT release (`isSpeaking: false/0`), including empty, null or omitted callsigns. Ignore unused release metadata, retain named-release matching and reject invalid starts. Add parser/state/UI regression tests for idle transitions, duplicate releases and delayed replies.
+
+- Fix setup AP access checks for IPv4-mapped IPv6 sockets so phones can open the setup page with the default dual-stack HTTP server. Keep station-interface requests blocked and add real-socket regression tests.
+
 - Recreate the FMO control connection on query timeout/partial sends so delayed replies cannot inherit a newer query. Retain the network worker through startup failures, clean up partial Wi-Fi initialization and support immediate menu retry.
 - Reject JSON-escaped NUL and overlong callsign/grid identifiers. Add controlled-clock query, startup-recovery and setup endpoint fault tests.
 - Add saved FMO hostname/IPv4 and port settings to setup, plus a worker-owned DNS/TCP port check using saved Wi-Fi. Keep session-token/AP access restrictions and distinguish port reachability from API compatibility.

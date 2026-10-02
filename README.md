@@ -6,8 +6,8 @@
 
 This firmware turns a FoloToy AI Passport into a small connected status display
 for a local FMO (NFM Over Internet) device. It shows the selected FMO channel,
-the callsign currently speaking, the last-heard callsign while idle, grid/host
-metadata when available, connection state, and battery level.
+the callsign currently speaking, the last-heard callsign while idle, radio
+configuration, connection state, and battery level.
 
 ## How it works
 
@@ -18,7 +18,8 @@ The monitor uses the local web interface exposed by an FMO device:
 - `ws://<host>:<port>/ws` receives a periodic
   `station/getCurrent` request so the display can show the selected channel.
 
-Both sockets reconnect automatically. No FMO device certificate or private key
+The optional `ws://<host>:<port>/audio` connection receives conversation audio.
+All enabled sockets reconnect automatically. No FMO device certificate or private key
 is copied to AI Passport because the firmware observes the local FMO interface;
 it does not act as a virtual FMO radio or connect directly to an FMO MQTT server.
 
@@ -26,15 +27,51 @@ it does not act as a virtual FMO radio or connect directly to an FMO MQTT server
 
 The portrait UI uses black, orange and white based on the supplied FMO reference
 images (not an official color specification). The large callsign belongs to the
-active speaker: orange while speaking, white for the last-heard callsign while
-idle. An orange line indicates speech activity, not audio amplitude. Unknown
-metadata is not simulated. Fonts are bundled Montserrat and Noto Sans CJK for
-Chinese channel names, not a claim to match the original FMO typeface.
+active speaker: bold orange while speaking, bold white for the last-heard callsign while
+idle. Grid coordinates, elapsed-time counters and station/host prefixes are hidden. An orange line indicates speech activity, not audio amplitude. Unknown
+metadata is not simulated. Callsigns use Montserrat Bold, setup passwords use
+the regular built-in weight, and Noto Sans CJK covers Chinese channel names, not a claim to match the original FMO typeface.
 Status and controls are in Chinese; callsigns, network names and addresses stay
 unchanged. The iOS-inspired battery capsule contains a numeric percentage, turns
 red at 20% or below, and shows an outlined unknown state when SOC is unavailable.
 It does not infer charging. Channel and callsign text is centered using visible
 glyph bounds, including smaller fonts for long callsigns and setup passwords.
+
+The portrait monitor includes an orange outlined radio panel with four rows:
+configured device name, frequency in MHz (four decimal places), antenna model,
+and antenna height in metres. Values come from the connected FMO device's
+`config/getUserPhyDeviceName`, `getUserPhyFreq`, `getUserPhyAnt`, and
+`getUserPhyAntHeight` responses. They describe that device's local radio
+configuration, not per-speaker equipment or live RF measurements. Reads run
+on connection and every 30 seconds, independently of speech/channel queries.
+Unset names/antenna or zero/unavailable frequency show `--`; a confirmed zero
+height shows `0 m`. Wi-Fi/control loss clears the panel until fresh responses
+arrive. Optional invalid metadata does not clear a current PTT or channel.
+Long name/model rows stay on one line with an ellipsis.
+
+The header shows the current time between FMO and the battery as `HH:MM`, in
+Beijing time (UTC+8). Wi-Fi starts a non-blocking SNTP service using
+`pool.ntp.org`; before the system clock is valid it shows `--:--`. Reconnection
+restarts synchronization without allocating another service. An already synced
+clock continues during a network interruption, and wake-up redraws the current
+minute. Time synchronization requires access to the NTP server. Grid coordinates
+and separate transmit/receive frequencies are not displayed.
+
+Conversation audio plays automatically after the FMO event/control connections
+are ready, at 50% volume by default. The `/audio` interface supplies 8 kHz,
+16-bit signed little-endian mono PCM; the existing ES8311/I2S driver plays it
+in a separate worker. A fixed 8 KiB queue handles split WebSocket frames,
+short buffering, underrun silence and bounded latency by dropping oldest samples
+on overflow. Muting or losing connectivity clears queued audio and closes only
+the audio socket; playback resumes with fresh data and a silent DMA prime.
+Audio continues while the LCD sleeps. No microphone capture, recording or
+transmit/PTT commands are added. The footer shows the audio switch, volume and long-OK setup hint together.
+With no active speech, the middle shows the last-heard callsign in bold white;
+before the first contact it shows listening, `--` and a waiting-for-speech hint.
+Runtime sound settings reset on reboot; `CONFIG_FMO_VOLUME` sets initial volume.
+Audio/codec failures leave the monitor running. Physical playback, concurrent
+RAM/stack headroom and end-to-end latency still require device validation.
+The interface is also described in the [FMO web client API documentation](https://github.com/niufox/fmo-mobile-controller/blob/main/API_DOCUMENTATION_v2.md).
 
 Native UI checks and actual LVGL framebuffer previews can be built after the
 firmware dependencies have been fetched:
@@ -109,7 +146,7 @@ only through the setup AP, uses a per-session token, and never returns the saved
 Wi-Fi password. Credentials are stored in ordinary NVS, not encrypted storage.
 
 Advanced users can still set build-time Wi-Fi fallback, FMO host/port and
-brightness via `idf.py menuconfig` → **FMO Live Monitor**. Saved settings take
+brightness and initial audio volume via `idf.py menuconfig` → **FMO Live Monitor**. Saved settings take
 priority over build-time Wi-Fi values. Do not distribute builds with credentials.
 
 ## Build and install
@@ -143,9 +180,10 @@ and cannot reliably identify a reinstall of the same binary.
 
 ## Controls
 
-- **UP**: increase backlight brightness by 10%.
-- **DOWN**: decrease backlight brightness by 10%.
-- **OK**: refresh the current FMO channel immediately.
+- **UP**: increase conversation volume by 10%, up to 100%.
+- **DOWN**: decrease conversation volume by 10%, down to 0%.
+- **OK**: toggle audio on/off while preserving the selected volume.
+- **Long UP**: refresh the current FMO channel immediately (the five-second boot Recovery hook is unchanged).
 - **Long OK**: open the network menu; UP/DOWN selects, click OK executes, long OK returns.
 - **Setup click OK**: switch QR/credentials; long OK cancels to the network menu.
 
@@ -153,7 +191,7 @@ and cannot reliably identify a reinstall of the same binary.
 
 With no speech or button activity, the screen dims to at most 20% after 30 seconds
 and switches off after 90 seconds. The LCD enters panel sleep and its refresh
-pauses; Wi-Fi, both FMO connections, and button scanning remain active. A valid
+pauses; Wi-Fi, FMO event/control connections, enabled audio playback and button scanning remain active. A valid
 speech-start event or any button wakes it. The first button gesture only wakes
 the screen, including a long press; use the next gesture for the usual controls.
 Continuous speech, the network menu, and Wi-Fi setup keep the screen awake. Wake-up redraws the
@@ -175,8 +213,10 @@ private keys, or unsanitized logs.
 - Confirm the Passport connects to the intended 2.4 GHz network.
 - Confirm the current channel matches the FMO screen after boot and after an
   FMO-side channel change.
-- Key and release a radio and verify the speaking indicator, callsign,
-  host/grid metadata, and last-heard transitions.
+- Key and release a radio and verify the speaking indicator,
+  bold callsign and last-heard transitions, with grid coordinates hidden.
+  With a stable connection and confirmed channel, starts, talker changes and
+  releases should not show the synchronization screen.
 - Leave both devices running through a Wi-Fi interruption and confirm automatic
   reconnection.
 - Confirm 30-second dimming, 90-second screen-off, button and speech wake-up,
@@ -196,13 +236,21 @@ private keys, or unsanitized logs.
   receives the latest result, even when it cannot consume every PTT transition.
 - Chinese channel names are retained as UTF-8. Bounded copies truncate only at
   character boundaries; invalid text falls back to the channel UID.
-- Invalid JSON, malformed/overlong callsign or grid fields, and raw or JSON-escaped NUL clear live
+- Explicit `isSpeaking: false/0` ends speech without invalidating the confirmed
+  channel or last-heard display. Empty, null or omitted callsigns release the current
+  talker; named releases must match. Release grid/host metadata is unused, and
+  duplicates do not reset the last-heard time. Starts still require a valid callsign
+  and validated optional metadata.
+- Invalid JSON, invalid callsigns/start metadata, and raw or JSON-escaped NUL clear live
   speech and require a fresh channel query. Replies predating a new speaker do
-  not erase that speaker or restore an unconfirmed channel.
+  not erase that speaker, invalidate a confirmed channel, or restore an unknown channel.
 - Both abnormal disconnects and clean CLOSE handshakes reconnect. Failed client
   creation is retried while Wi-Fi is available.
-- Channel queries run every second and after a new talker. Until confirmation,
-  the UI shows synchronization instead of attributing speech to an old channel.
+- Channel queries run every second and after a new talker. With a confirmed
+  channel, speech starts immediately on screen while the query runs in the
+  background. An unknown channel still shows synchronization. A reply from
+  before the latest talker is discarded and retried without blanking an existing
+  confirmed channel or extending its confirmation age.
   Changing channel clears prior callsigns. Confirmation expires after five seconds.
 - The local event protocol does not carry a channel UID. Across the two sockets,
   channel attribution is best effort: a switch clears ambiguous speech and waits

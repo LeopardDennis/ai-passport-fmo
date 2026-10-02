@@ -50,9 +50,17 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_fmo_endpoint.c main/fmo_endpoint.c -o "${test_dir}/test_fmo_endpoint"
     "${test_dir}/test_fmo_endpoint"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_fmo_clock.c main/fmo_clock.c -o "${test_dir}/test_fmo_clock"
+    "${test_dir}/test_fmo_clock"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_fmo_pcm.c main/fmo_pcm.c -o "${test_dir}/test_fmo_pcm"
+    "${test_dir}/test_fmo_pcm"
+    python3 tests/test_fmo_audio_runtime.py
     python3 tests/test_compact_font.py
     python3 tests/test_fmo_storage.py
     python3 tests/test_fmo_display_runtime.py
+    python3 tests/test_fmo_provision_access.py
     python3 tests/test_fmo_provision_runtime.py
     python3 tests/test_fmo_network.py
     python3 tests/test_fmo_endpoint_runtime.py

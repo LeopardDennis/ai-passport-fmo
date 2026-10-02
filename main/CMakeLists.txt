@@ -11,6 +11,11 @@ endif()
 idf_component_register(
     SRCS "main.c"
          "fmo_ui.c"
+         "fmo_clock.c"
+         "fmo_audio.c"
+         "fmo_pcm.c"
+         "../assets/fonts/fmo_callsign_bold_20.c"
+         "../assets/fonts/fmo_callsign_bold_32.c"
          "fmo_controls.c"
          "fmo_wifi_qr.c"
          "${FMO_COMPACT_FONT}"

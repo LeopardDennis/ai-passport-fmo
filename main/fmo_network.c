@@ -17,6 +17,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_websocket_client.h"
 #include "esp_wifi.h"
 #include "freertos/event_groups.h"
@@ -33,6 +34,7 @@ static atomic_bool s_retry_requested;
 
 #define FMO_CHANNEL_REFRESH_MS 1000
 #define FMO_CHANNEL_MAX_AGE_MS 5000
+#define FMO_RADIO_REFRESH_MS 30000
 
 typedef enum {
     FMO_SOCKET_EVENTS,
@@ -51,6 +53,9 @@ static SemaphoreHandle_t s_state_lock;
 static fmo_snapshot_t s_snapshot;
 static uint32_t s_speaker_revision;
 static uint32_t s_query_revision;
+static uint64_t s_radio_query_ms;
+static bool s_radio_requested;
+static bool s_clock_initialized, s_clock_online;
 static bool s_query_pending;
 static uint64_t s_query_ms;
 static unsigned s_events_stack_min = UINT32_MAX;
@@ -79,7 +84,7 @@ static void post_update(const fmo_update_t *update)
     switch (update->type) {
     case FMO_UPDATE_WIFI:
         fmo_monitor_set_wifi(state, update->connected);
-        if (!update->connected) s_query_pending = false;
+        if (!update->connected) { s_query_pending = false; s_radio_requested = false; }
         break;
     case FMO_UPDATE_EVENTS_LINK:
         fmo_monitor_set_events(state, update->connected && state->wifi_connected);
@@ -87,6 +92,7 @@ static void post_update(const fmo_update_t *update)
         refresh = update->connected;
         break;
     case FMO_UPDATE_CONTROL_LINK:
+        if (!update->connected) s_radio_requested = false;
         fmo_monitor_set_control(state, update->connected && state->wifi_connected);
         s_query_pending = false;
         refresh = update->connected;
@@ -97,8 +103,9 @@ static void post_update(const fmo_update_t *update)
                 fmo_monitor_set_channel(state, update->uid, update->text);
                 state->channel_confirmed_ms = now_ms();
             } else {
-                // An older reply must not erase a newer speaker on UID change.
-                fmo_monitor_invalidate_channel(state);
+                // Discard replies from before the latest talker. Keep an existing
+                // confirmed channel visible while a fresh query runs; its age
+                // still expires normally, and an unknown channel stays unknown.
                 refresh = true;
             }
         }
@@ -110,11 +117,29 @@ static void post_update(const fmo_update_t *update)
             if (update->speaking &&
                 (!state->speaking || strcmp(state->speaker, update->callsign) != 0)) {
                 ++s_speaker_revision;
-                fmo_monitor_invalidate_channel(state);
+                // Starting speech requests a background refresh, not a loss of
+                // the channel that was already confirmed on this connection.
                 refresh = true;
             }
             fmo_monitor_apply_speaker(state, update->callsign, update->grid,
                                       update->speaking, update->is_host, now_ms());
+        }
+        break;
+    case FMO_UPDATE_RADIO_NAME:
+    case FMO_UPDATE_RADIO_FREQUENCY:
+    case FMO_UPDATE_RADIO_ANTENNA:
+    case FMO_UPDATE_RADIO_HEIGHT:
+        if (state->wifi_connected && state->control_connected) {
+            if (update->type == FMO_UPDATE_RADIO_NAME)
+                fmo_text_copy_utf8(state->radio.device_name, sizeof(state->radio.device_name), update->text);
+            else if (update->type == FMO_UPDATE_RADIO_ANTENNA)
+                fmo_text_copy_utf8(state->radio.antenna, sizeof(state->radio.antenna), update->text);
+            else if (update->type == FMO_UPDATE_RADIO_FREQUENCY)
+                state->radio.frequency_100hz = update->valid ? update->value : 0;
+            else {
+                state->radio.antenna_height_m = update->valid ? update->value : 0;
+                state->radio.height_valid = update->valid;
+            }
         }
         break;
     case FMO_UPDATE_ERROR:
@@ -205,23 +230,58 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
         const cJSON *grid = cJSON_GetObjectItemCaseSensitive(data, "grid");
         const cJSON *speaking = cJSON_GetObjectItemCaseSensitive(data, "isSpeaking");
         const cJSON *is_host = cJSON_GetObjectItemCaseSensitive(data, "isHost");
-        if (cJSON_IsString(callsign) &&
-            (cJSON_IsBool(speaking) || (cJSON_IsNumber(speaking) &&
-             (speaking->valuedouble == 0 || speaking->valuedouble == 1)))) {
+        if (cJSON_IsBool(speaking) || (cJSON_IsNumber(speaking) &&
+            (speaking->valuedouble == 0 || speaking->valuedouble == 1))) {
             fmo_update_t update = {
                 .type = FMO_UPDATE_SPEAKER,
                 .speaking = json_bool(speaking),
-                .is_host = json_bool(is_host),
             };
-            bool valid = copy_ascii(update.callsign, sizeof(update.callsign), callsign->valuestring) &&
-                         update.callsign[0];
-            if (grid && !cJSON_IsNull(grid)) valid = valid && cJSON_IsString(grid) &&
-                copy_ascii(update.grid, sizeof(update.grid), grid->valuestring);
-            if (is_host) valid = valid && (cJSON_IsBool(is_host) || (cJSON_IsNumber(is_host) &&
-                (is_host->valuedouble == 0 || is_host->valuedouble == 1)));
+            /* An explicit idle event may omit the callsign or send null/"".
+             * Release metadata is not used; only starts need grid/host fields.
+             * Keep named releases matched so an old talker cannot stop a new one. */
+            bool valid = cJSON_IsString(callsign) ?
+                copy_ascii(update.callsign, sizeof(update.callsign), callsign->valuestring) :
+                !update.speaking && (!callsign || cJSON_IsNull(callsign));
+            if (update.speaking) {
+                valid = valid && update.callsign[0];
+                if (grid && !cJSON_IsNull(grid)) valid = valid && cJSON_IsString(grid) &&
+                    copy_ascii(update.grid, sizeof(update.grid), grid->valuestring);
+                if (is_host) valid = valid && (cJSON_IsBool(is_host) || (cJSON_IsNumber(is_host) &&
+                    (is_host->valuedouble == 0 || is_host->valuedouble == 1)));
+                update.is_host = json_bool(is_host);
+            }
             if (valid) post_update(&update);
             else invalidate_live_message();
         } else invalidate_live_message();
+    } else if (kind == FMO_SOCKET_CONTROL && strcmp(type->valuestring, "config") == 0) {
+        fmo_update_t update = {0};
+        const cJSON *field;
+        if (!strcmp(sub_type->valuestring, "getUserPhyDeviceNameResponse") ||
+            !strcmp(sub_type->valuestring, "getUserPhyAntResponse")) {
+            bool antenna = !strcmp(sub_type->valuestring, "getUserPhyAntResponse");
+            update.type = antenna ? FMO_UPDATE_RADIO_ANTENNA : FMO_UPDATE_RADIO_NAME;
+            field = cJSON_GetObjectItemCaseSensitive(data, antenna ? "ant" : "deviceName");
+            if (cJSON_IsString(field))
+                fmo_text_copy_utf8(update.text, sizeof(update.text), field->valuestring);
+        } else if (!strcmp(sub_type->valuestring, "getUserPhyFreqResponse")) {
+            update.type = FMO_UPDATE_RADIO_FREQUENCY;
+            field = cJSON_GetObjectItemCaseSensitive(data, "freq");
+            // FMO config uses MHz, not the Hz field in historical QSO logs.
+            if (cJSON_IsNumber(field) && field->valuedouble > 0 && field->valuedouble <= 1000) {
+                update.value = (uint32_t)(field->valuedouble * 10000 + 0.5);
+                update.valid = true;
+            }
+        } else if (!strcmp(sub_type->valuestring, "getUserPhyAntHeightResponse")) {
+            update.type = FMO_UPDATE_RADIO_HEIGHT;
+            field = cJSON_GetObjectItemCaseSensitive(data, "height");
+            if (cJSON_IsNumber(field) && field->valuedouble >= 0 && field->valuedouble <= 100000 &&
+                field->valuedouble == (uint32_t)field->valuedouble) {
+                update.value = (uint32_t)field->valuedouble;
+                update.valid = true;
+            }
+        } else { cJSON_Delete(root); return; }
+        // Optional metadata must not invalidate a current channel or PTT state.
+        post_update(&update);
     } else if (kind == FMO_SOCKET_CONTROL && strcmp(type->valuestring, "station") == 0 &&
                strcmp(sub_type->valuestring, "getCurrentResponse") == 0) {
         const cJSON *uid = cJSON_GetObjectItemCaseSensitive(data, "uid");
@@ -299,6 +359,51 @@ static bool request_current_channel(void)
         return true; // A partially sent query also has ambiguous reply ownership.
     }
     return false;
+}
+
+/* Optional configuration reads share the control socket. Missing replies do
+ * not interrupt channel synchronization; retry at a low rate, never per PTT. */
+static bool request_radio_profile(void)
+{
+    if (!s_control_socket.client ||
+        !esp_websocket_client_is_connected(s_control_socket.client)) return false;
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    bool due = !s_radio_requested || now_ms() - s_radio_query_ms >= FMO_RADIO_REFRESH_MS;
+    if (due) {
+        s_radio_requested = true;
+        s_radio_query_ms = now_ms();
+    }
+    xSemaphoreGive(s_state_lock);
+    if (!due) return false;
+    static const char *const methods[] = {
+        "getUserPhyDeviceName", "getUserPhyFreq", "getUserPhyAnt", "getUserPhyAntHeight"
+    };
+    char request[96];
+    for (unsigned i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i) {
+        int length = snprintf(request, sizeof(request),
+            "{\"type\":\"config\",\"subType\":\"%s\",\"data\":{}}", methods[i]);
+        if (length <= 0 || (size_t)length >= sizeof(request) ||
+            esp_websocket_client_send_text(s_control_socket.client, request, length,
+                pdMS_TO_TICKS(250)) != length) return true;
+    }
+    return false;
+}
+
+/* The coordinator owns one lifetime SNTP service. No wait for synchronization:
+ * the display stays usable with --:-- until the system clock becomes valid. */
+static void update_clock_service(bool online)
+{
+    if (!online) { s_clock_online = false; return; }
+    if (s_clock_online) return;
+    esp_err_t err;
+    if (!s_clock_initialized) {
+        esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+        config.wait_for_sync = false;
+        err = esp_netif_sntp_init(&config);
+        if (err == ESP_OK) s_clock_initialized = true;
+    } else err = esp_netif_sntp_start();
+    s_clock_online = err == ESP_OK;
+    if (err != ESP_OK) ESP_LOGW(TAG, "Clock service unavailable; retrying");
 }
 
 static void websocket_event(void *handler_args, esp_event_base_t event_base,
@@ -596,6 +701,7 @@ static void network_task(void *argument)
         check_setup_request();
         EventBits_t old_bits = xEventGroupClearBits(s_wifi_bits, FMO_WIFI_DISCONNECTED_BIT);
         if (!(old_bits & FMO_WIFI_READY_BIT) || (old_bits & FMO_WIFI_DISCONNECTED_BIT)) {
+            update_clock_service(false);
             stop_socket(&s_events_socket);
             stop_socket(&s_control_socket);
             if (old_bits & FMO_WIFI_DISCONNECTED_BIT)
@@ -603,6 +709,7 @@ static void network_task(void *argument)
         }
         retry_wifi();
         if (xEventGroupGetBits(s_wifi_bits) & FMO_WIFI_READY_BIT) {
+            update_clock_service(true);
             if (!s_events_socket.client) {
                 err = start_socket(&s_events_socket, events_uri);
                 if (err != ESP_OK) ESP_LOGW(TAG, "Events client creation failed; retrying");
@@ -611,7 +718,8 @@ static void network_task(void *argument)
                 err = start_socket(&s_control_socket, control_uri);
                 if (err != ESP_OK) ESP_LOGW(TAG, "Control client creation failed; retrying");
             }
-            if (request_current_channel()) stop_socket(&s_control_socket);
+            if (request_current_channel() || request_radio_profile())
+                stop_socket(&s_control_socket);
         }
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
         if (s_snapshot.state.channel_valid &&

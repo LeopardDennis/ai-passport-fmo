@@ -20,7 +20,10 @@ preamble = r'''
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#define time clock_time
 #define CONFIG_FMO_BACKLIGHT 80
+#define CONFIG_FMO_VOLUME 50
 #define BSP_BTN_COUNT 3
 #define pdTRUE 1
 #define ESP_OK 0
@@ -34,8 +37,17 @@ typedef int lv_timer_t;
 '''
 stubs = r'''
 static uint64_t clock_ms;
+static bool clock_ready;
+static time_t clock_time(time_t *out) {
+    time_t value=(time_t)1767225600+(time_t)(clock_ms/1000);
+    if(out)*out=value;return value;
+}
 static int paused, panel_dark, brightness=80, fail_sleep, fail_wake;
 static int renders, notices, requests, setups, retries, cancels;
+static unsigned audio_volume;
+static bool audio_online;
+static void fmo_audio_set_volume(uint8_t volume) {audio_volume=volume;}
+static void fmo_audio_set_online(bool online) {audio_online=online;}
 static bool has_snapshot;
 static fmo_snapshot_t next_snapshot;
 static char trace[100];
@@ -57,10 +69,13 @@ static esp_err_t bsp_display_sleep(bool sleep) {
 }
 static void *lv_screen_active(void) { return NULL; }
 static void lv_obj_invalidate(void *s) { (void)s; assert(!panel_dark && !paused); mark('i'); }
+static void fmo_ui_set_clock(int64_t utc) {
+    assert(!panel_dark && !paused && utc==(int64_t)clock_time(NULL));clock_ready=true;
+}
 static void fmo_ui_render(const fmo_monitor_state_t *s, const char *e, const char *ssid,
                          const char *pw, int soc, uint64_t now, bool hint, const fmo_controls_t *controls) {
     (void)s; (void)e; (void)ssid; (void)pw; (void)soc; (void)now; (void)hint; (void)controls;
-    assert(!panel_dark && !paused); ++renders; mark('d');
+    assert(!panel_dark && !paused && clock_ready);clock_ready=false; ++renders; mark('d');
 }
 static void lv_refr_now(lv_display_t *d) {
     (void)d; assert(!panel_dark && brightness==0 && !paused); mark('f');
@@ -101,11 +116,11 @@ int main(void) {
     key(BSP_BTN_DOWN, BSP_BTN_CLICK); key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(retries==1 && s_controls.view==FMO_VIEW_MONITOR);
     key(BSP_BTN_UP, BSP_BTN_PRESS); key(BSP_BTN_UP, BSP_BTN_CLICK);
-    assert(update_display(clock_ms)); assert(brightness==90);
+    assert(update_display(clock_ms)); assert(brightness==80 && s_controls.volume==60 && audio_volume==60);
     // Failed sleep restores refresh and backlight; retries are rate-limited.
     clock_ms += 90000; fail_sleep=1; trace[0]=0;
     assert(update_display(clock_ms));
-    assert(!paused && !panel_dark && !atomic_load(&s_display_dark) && brightness==90);
+    assert(!paused && !panel_dark && !atomic_load(&s_display_dark) && brightness==80);
     assert(!strcmp(trace,"psrb")); trace[0]=0;
     assert(update_display(clock_ms+500) && !trace[0]);
     fail_sleep=0; clock_ms+=1000; assert(!update_display(clock_ms));
@@ -114,12 +129,12 @@ int main(void) {
     assert(!update_display(clock_ms)); assert(paused && panel_dark && brightness==0);
     assert(!update_display(clock_ms+500));
     fail_wake=0; clock_ms+=1000; assert(update_display(clock_ms));
-    key(BSP_BTN_DOWN, BSP_BTN_CLICK); assert(s_brightness==90 && notices==2);
+    key(BSP_BTN_DOWN, BSP_BTN_CLICK); assert(s_brightness==80 && notices==2);
     // A valid PTT wakes before channel confirmation; continuous speech stays awake.
     clock_ms+=90000; assert(!update_display(clock_ms));
     s_state.wifi_connected=s_state.events_connected=s_state.speaking=true;
     assert(update_display(clock_ms+1)); assert(!panel_dark);
-    assert(update_display(clock_ms+600000)); assert(brightness==90);
+    assert(update_display(clock_ms+600000)); assert(brightness==80);
     s_state.speaking=false;
     assert(!update_display(clock_ms+690000));
     strcpy(s_setup_ssid,"FMO-Setup-TEST");
@@ -131,8 +146,13 @@ int main(void) {
     next_snapshot.state=s_state; next_snapshot.speech_activity=1;
     s_fmo_queue=1; s_input_queue=2; has_snapshot=true;
     ui_tick(NULL); assert(!panel_dark && !s_state.speaking && s_speech_activity==1);
-    s_brightness=95; key(BSP_BTN_UP, BSP_BTN_CLICK); assert(s_brightness==100);
-    s_brightness=25; key(BSP_BTN_DOWN, BSP_BTN_CLICK); assert(s_brightness==20);
+    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(!s_controls.audio_enabled && audio_volume==0);
+    key(BSP_BTN_UP, BSP_BTN_CLICK); assert(s_controls.volume==70 && audio_volume==0);
+    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.audio_enabled && audio_volume==70);
+    key(BSP_BTN_UP, BSP_BTN_LONG); assert(requests==1);
+    s_state.control_connected=true; s_setup_ssid[0]=0; s_error[0]=0;
+    ui_tick(NULL); assert(audio_online);
+    s_state.wifi_connected=false; ui_tick(NULL); assert(!audio_online);
     puts("FMO display runtime: PASS (gesture, redraw, PTT/setup, failure recovery)");
 }
 '''

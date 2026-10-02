@@ -194,9 +194,25 @@ static const char page_end[] =
 
 static bool local_request(httpd_req_t *req)
 {
-    struct sockaddr_in local; socklen_t size = sizeof(local);
-    return getsockname(httpd_req_to_sockfd(req), (struct sockaddr *)&local, &size) == 0 &&
-           local.sin_addr.s_addr == s_ap_address;
+    struct sockaddr_storage local = {0};
+    socklen_t size = sizeof(local);
+    if (getsockname(httpd_req_to_sockfd(req), (struct sockaddr *)&local, &size) != 0)
+        return false;
+    if (local.ss_family == AF_INET && size >= sizeof(struct sockaddr_in)) {
+        const struct sockaddr_in *address = (const struct sockaddr_in *)&local;
+        return address->sin_addr.s_addr == s_ap_address;
+    }
+#if CONFIG_LWIP_IPV6
+    /* ESP-IDF's dual-stack HTTP listener reports IPv4 connections as
+     * ::ffff:a.b.c.d. Compare the mapped IPv4 bytes with the AP address. */
+    if (local.ss_family == AF_INET6 && size >= sizeof(struct sockaddr_in6)) {
+        const struct sockaddr_in6 *address = (const struct sockaddr_in6 *)&local;
+        return IN6_IS_ADDR_V4MAPPED(&address->sin6_addr) &&
+               memcmp(&address->sin6_addr.s6_addr[12], &s_ap_address,
+                      sizeof(s_ap_address)) == 0;
+    }
+#endif
+    return false;
 }
 static esp_err_t root_get(httpd_req_t *req)
 {

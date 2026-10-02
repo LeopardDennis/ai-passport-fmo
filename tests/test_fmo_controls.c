@@ -5,9 +5,16 @@
 #include <string.h>
 int main(void)
 {
-    fmo_controls_t c = {0};
-    assert(fmo_controls_key(&c, FMO_KEY_UP) == FMO_ACTION_BRIGHTER);
-    assert(fmo_controls_key(&c, FMO_KEY_OK) == FMO_ACTION_REFRESH);
+    fmo_controls_t c = {.audio_enabled=true,.volume=50};
+    assert(fmo_controls_key(&c, FMO_KEY_UP) == FMO_ACTION_VOLUME);
+    assert(c.volume==60);
+    assert(fmo_controls_key(&c, FMO_KEY_DOWN) == FMO_ACTION_VOLUME && c.volume==50);
+    c.volume=95; fmo_controls_key(&c,FMO_KEY_UP); assert(c.volume==100);
+    c.volume=5; fmo_controls_key(&c,FMO_KEY_DOWN); assert(c.volume==0);
+    c.volume=50;
+    assert(fmo_controls_key(&c,FMO_KEY_OK)==FMO_ACTION_AUDIO && !c.audio_enabled);
+    assert(fmo_controls_key(&c,FMO_KEY_OK)==FMO_ACTION_AUDIO && c.audio_enabled);
+    assert(fmo_controls_key(&c, FMO_KEY_REFRESH) == FMO_ACTION_REFRESH);
     assert(fmo_controls_key(&c, FMO_KEY_BACK) == FMO_ACTION_NONE);
     assert(c.view == FMO_VIEW_NETWORK && c.selection == 0);
     assert(fmo_controls_key(&c, FMO_KEY_OK) == FMO_ACTION_SETUP);

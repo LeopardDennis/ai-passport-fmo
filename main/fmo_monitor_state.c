@@ -26,6 +26,7 @@ void fmo_monitor_set_wifi(fmo_monitor_state_t *state, bool connected)
     if (!state) return;
     state->wifi_connected = connected;
     if (!connected) {
+        memset(&state->radio, 0, sizeof(state->radio));
         state->channel_valid = false;
         state->events_connected = false;
         state->control_connected = false;
@@ -53,7 +54,10 @@ void fmo_monitor_set_control(fmo_monitor_state_t *state, bool connected)
 {
     if (!state) return;
     state->control_connected = connected;
-    if (!connected) state->channel_valid = false;
+    if (!connected) {
+        state->channel_valid = false;
+        memset(&state->radio, 0, sizeof(state->radio));
+    }
 }
 
 void fmo_monitor_invalidate_channel(fmo_monitor_state_t *state)
@@ -82,9 +86,11 @@ void fmo_monitor_apply_speaker(fmo_monitor_state_t *state,
                                const char *callsign, const char *grid,
                                bool speaking, bool is_host, uint64_t now_ms)
 {
-    if (!state || !callsign || callsign[0] == '\0') return;
+    if (!state) return;
+    if (!callsign) callsign = "";
 
     if (speaking) {
+        if (!callsign[0]) return;
         copy_text(state->speaker, sizeof(state->speaker), callsign);
         copy_text(state->last_speaker, sizeof(state->last_speaker), callsign);
         copy_text(state->grid, sizeof(state->grid), grid);
@@ -94,7 +100,7 @@ void fmo_monitor_apply_speaker(fmo_monitor_state_t *state,
         return;
     }
 
-    if (state->speaking && strcmp(state->speaker, callsign) == 0) {
+    if (state->speaking && (!callsign[0] || strcmp(state->speaker, callsign) == 0)) {
         state->speaking = false;
         state->speaker[0] = '\0';
         state->last_speaker_ms = now_ms;

@@ -15,6 +15,10 @@ typedef enum {
     FMO_UPDATE_CHANNEL,
     FMO_UPDATE_SPEAKER,
     FMO_UPDATE_ERROR,
+    FMO_UPDATE_RADIO_NAME,
+    FMO_UPDATE_RADIO_FREQUENCY,
+    FMO_UPDATE_RADIO_ANTENNA,
+    FMO_UPDATE_RADIO_HEIGHT,
 } fmo_update_type_t;
 
 typedef struct {
@@ -23,6 +27,8 @@ typedef struct {
     bool speaking;
     bool is_host;
     uint32_t uid;
+    uint32_t value;
+    bool valid;
     char callsign[16];
     char grid[12];
     char text[48];

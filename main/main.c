@@ -9,6 +9,7 @@
 #include "bsp_i2c.h"
 #include "bsp_pins.h"
 #include "fmo_display_policy.h"
+#include "fmo_audio.h"
 #include "fmo_controls.h"
 #include "fmo_monitor_state.h"
 #include "fmo_network.h"
@@ -25,6 +26,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 static const char *TAG = "fmo_monitor";
 
@@ -42,7 +44,7 @@ typedef struct {
 static QueueHandle_t s_fmo_queue;
 static QueueHandle_t s_input_queue;
 static fmo_monitor_state_t s_state;
-static fmo_controls_t s_controls;
+static fmo_controls_t s_controls = {.audio_enabled = true, .volume = CONFIG_FMO_VOLUME};
 static uint32_t s_speech_activity;
 static char s_error[48];
 static char s_setup_ssid[33];
@@ -85,18 +87,15 @@ static void apply_input(const app_input_t *input)
         return;
     }
     fmo_key_t key;
-    if (input->event == BSP_BTN_LONG && button == BSP_BTN_OK) key = FMO_KEY_BACK;
+    if (input->event == BSP_BTN_LONG && button == BSP_BTN_UP) key = FMO_KEY_REFRESH;
+    else if (input->event == BSP_BTN_LONG && button == BSP_BTN_OK) key = FMO_KEY_BACK;
     else if (input->event == BSP_BTN_CLICK) key = button == BSP_BTN_UP ? FMO_KEY_UP :
         button == BSP_BTN_DOWN ? FMO_KEY_DOWN : FMO_KEY_OK;
     else return;
     switch (fmo_controls_key(&s_controls, key)) {
-    case FMO_ACTION_BRIGHTER:
-        s_brightness += 10;
-        if (s_brightness > 100) s_brightness = 100;
-        break;
-    case FMO_ACTION_DIMMER:
-        s_brightness -= 10;
-        if (s_brightness < 20) s_brightness = 20;
+    case FMO_ACTION_VOLUME:
+    case FMO_ACTION_AUDIO:
+        fmo_audio_set_volume(s_controls.audio_enabled ? s_controls.volume : 0);
         break;
     case FMO_ACTION_REFRESH:
         fmo_network_request_refresh();
@@ -138,6 +137,7 @@ static bool update_display(uint64_t now)
         if (target != FMO_DISPLAY_DARK) {
             lv_timer_resume(refresh);
             lv_obj_invalidate(lv_screen_active());
+            fmo_ui_set_clock((int64_t)time(NULL));
             fmo_ui_render(&s_state, s_error, s_setup_ssid, s_setup_password,
                           s_battery_soc, now, now < s_hint_until_ms, &s_controls);
             lv_refr_now(display);
@@ -179,10 +179,13 @@ static void ui_tick(lv_timer_t *timer)
         dirty = true;
     }
 
+    fmo_audio_set_online(s_state.wifi_connected && s_state.events_connected &&
+                         s_state.control_connected && !s_setup_ssid[0] && !s_error[0]);
     uint64_t now_ms = monotonic_ms();
     if (!update_display(now_ms)) return;
     uint64_t current_second = now_ms / 1000;
     if (dirty || current_second != s_last_render_second) {
+        fmo_ui_set_clock((int64_t)time(NULL));
         fmo_ui_render(&s_state, s_error, s_setup_ssid, s_setup_password,
                       s_battery_soc, now_ms, now_ms < s_hint_until_ms, &s_controls);
         s_last_render_second = current_second;
@@ -260,6 +263,11 @@ void app_main(void)
         if (xTaskCreate(battery_task, "battery_monitor", 2048, NULL, 2, &s_battery_task) != pdPASS)
             ESP_LOGW(TAG, "Battery worker unavailable");
     }
+
+    fmo_audio_set_volume(s_controls.audio_enabled ? s_controls.volume : 0);
+    esp_err_t audio_err = fmo_audio_start();
+    if (audio_err != ESP_OK)
+        ESP_LOGW(TAG, "Audio worker unavailable: %s", esp_err_to_name(audio_err));
 
     esp_err_t err = fmo_network_start(s_fmo_queue);
     if (err != ESP_OK) {
