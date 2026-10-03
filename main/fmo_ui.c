@@ -15,30 +15,39 @@
 #define MUTED 0x929292
 #define LINE 0x303030
 #define RED 0xFF5252
+#define CROSS_SERVER_COLOR 0xF66969
+#define GRID_COLOR MUTED
 /* Fixed bands: unknown metadata and first idle use the same geometry as
  * live speech. Status/error text shares the air row instead of moving panels. */
 #define LINK_TOP 32
 #define LINK_HEIGHT 24
 #define CHANNEL_TOP 62
 #define CHANNEL_HEIGHT 32
-#define RADIO_TOP 102
-#define RADIO_ROW_HEIGHT 26
-#define AIR_TOP 218
-#define CALLSIGN_TOP 245
-#define ACTIVITY_TOP 289
-#define FOOTER_TOP 296
+#define QSO_TOP 161
+#define QSO_ROW_HEIGHT 32
+#define QSO_ROWS_TOP 28
+#define QSO_TEXT_HEIGHT 14
+#define QSO_TIME_OFFSET 16
+#define AIR_TOP 98
+#define AIR_HEIGHT 16
+#define CALLSIGN_TOP 116
+#define ACTIVITY_TOP 151
+#define FOOTER_TOP 294
 LV_FONT_DECLARE(fmo_channel_font);
+LV_FONT_DECLARE(fmo_callsign_bold_14);
 LV_FONT_DECLARE(fmo_callsign_bold_20);
 LV_FONT_DECLARE(fmo_callsign_bold_32);
 
 static lv_obj_t *link_label, *battery_label, *channel_label, *clock_label;
 static lv_obj_t *battery_body;
 static int last_battery = -2;
-static lv_obj_t *air_label, *callsign_label, *hint_label;
-static lv_obj_t *radio_panel, *radio_labels[4];
+static lv_obj_t *air_label, *callsign_label, *grid_label, *hint_label;
+static lv_obj_t *qso_panel, *qso_labels[FMO_HISTORY_COUNT];
+static char qso_times[FMO_HISTORY_COUNT][20];
 static fmo_audio_meter_t audio_meter;
 static bool audio_meter_enabled;
 static int audio_bar_width;
+static int audio_bar_top = ACTIVITY_TOP;
 
 static void text(lv_obj_t *label, const char *value)
 {
@@ -53,7 +62,7 @@ static void color(lv_obj_t *obj, uint32_t value)
 
 /* Center the union of visible glyph boxes, not the font's ascent/descent
  * padding. LVGL's UTF-8 decoder matches the pinned renderer's behavior. */
-static void center_ink(lv_obj_t *obj, int top, int height, uint32_t reference)
+static int center_ink(lv_obj_t *obj, int top, int height, uint32_t reference)
 {
     const lv_font_t *font = lv_obj_get_style_text_font(obj, 0);
     lv_font_glyph_dsc_t glyph;
@@ -68,7 +77,7 @@ static void center_ink(lv_obj_t *obj, int top, int height, uint32_t reference)
         if (y + glyph.box_h > ink_bottom) ink_bottom = y + glyph.box_h;
     }
     if (ink_top == INT32_MAX) {
-        if (!lv_font_get_glyph_dsc(font, &glyph, reference, 0) || !glyph.box_h) return;
+        if (!lv_font_get_glyph_dsc(font, &glyph, reference, 0) || !glyph.box_h) return top + height - 1;
         ink_top = font->line_height - font->base_line - glyph.box_h - glyph.ofs_y;
         ink_bottom = ink_top + glyph.box_h;
     }
@@ -76,6 +85,7 @@ static void center_ink(lv_obj_t *obj, int top, int height, uint32_t reference)
     /* Coordinates can be stale until the next layout pass. Compare the
      * requested style position so consecutive snapshots cannot skip a move. */
     if (lv_obj_get_style_y(obj, 0) != y) lv_obj_set_y(obj, y);
+    return y + ink_bottom - 1;
 }
 
 static lv_obj_t *label(lv_obj_t *parent, int x, int y, int w,
@@ -257,8 +267,26 @@ static void audio_bar_area(lv_obj_t *obj, lv_area_t *area, int width)
     lv_obj_get_coords(obj, area);
     area->x1 += 12;
     area->x2 = area->x1 + width - 1;
-    area->y1 += ACTIVITY_TOP;
+    area->y1 += audio_bar_top;
     area->y2 = area->y1 + 1;
+}
+
+/* Center the 2 px bar between visible callsign/grid ink and the panel.
+ * Clear both old and new areas even when PCM width has not changed. */
+static void position_audio_bar(int ink_bottom)
+{
+    int top = (ink_bottom + QSO_TOP - 1) / 2;
+    if (top == audio_bar_top) return;
+    lv_area_t area;
+    if (audio_bar_width) {
+        audio_bar_area(monitor_content, &area, audio_bar_width);
+        lv_obj_invalidate_area(monitor_content, &area);
+    }
+    audio_bar_top = top;
+    if (audio_bar_width) {
+        audio_bar_area(monitor_content, &area, audio_bar_width);
+        lv_obj_invalidate_area(monitor_content, &area);
+    }
 }
 
 static void draw_audio_bar(lv_event_t *event)
@@ -290,6 +318,35 @@ void fmo_ui_set_audio_level(uint8_t level, uint64_t now_ms)
     audio_bar_width = width;
 }
 
+/* Dates are fixed text without scrolling. Draw them in the panel instead of
+ * allocating extra date labels, preserving the 24 KiB LVGL redraw headroom. */
+static void draw_qso_times(lv_event_t *event)
+{
+    lv_area_t panel;
+    lv_obj_get_coords(lv_event_get_target(event), &panel);
+    const lv_font_t *font = &lv_font_montserrat_14;
+    lv_font_glyph_dsc_t glyph;
+    if (!lv_font_get_glyph_dsc(font, &glyph, '0', 0)) return;
+    int ink_top = font->line_height - font->base_line - glyph.box_h - glyph.ofs_y;
+    for (unsigned i = 0; i < FMO_HISTORY_COUNT; ++i) {
+        lv_area_t area = {
+            .x1 = panel.x1 + 12, .x2 = panel.x1 + 207,
+            .y1 = panel.y1 + QSO_ROWS_TOP + QSO_ROW_HEIGHT * i + QSO_TIME_OFFSET +
+                  (QSO_TEXT_HEIGHT - glyph.box_h) / 2 - ink_top,
+        };
+        area.y2 = area.y1 + font->line_height - 1;
+        lv_draw_label_dsc_t dsc;
+        lv_draw_label_dsc_init(&dsc);
+        dsc.base.obj = lv_event_get_target(event);
+        dsc.base.id1 = i;
+        dsc.font = font;
+        dsc.color = lv_color_hex(MUTED);
+        dsc.text = qso_times[i];
+        dsc.text_local = true;
+        lv_draw_label(lv_event_get_layer(event), &dsc, &area);
+    }
+}
+
 static void create_monitor(void)
 {
     lv_obj_t *screen = rect(lv_screen_active(), 0, 0, 240, 320, BLACK);
@@ -301,28 +358,37 @@ static void create_monitor(void)
     channel_label = label(channel, 8, 0, 200, &fmo_channel_font, BLACK, "--");
     lv_obj_set_style_text_align(channel_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(channel_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    radio_panel = rect(screen, 12, RADIO_TOP, 216, 8 + 4 * RADIO_ROW_HEIGHT, BLACK);
-    lv_obj_set_style_border_color(radio_panel, lv_color_hex(ORANGE), 0);
-    lv_obj_set_style_border_width(radio_panel, 1, 0);
-    lv_obj_set_style_radius(radio_panel, 8, 0);
-    const char *values[] = {"--", "-- MHz", "--", "高度: -- m"};
-    for (unsigned i = 0; i < 4; ++i) {
-        radio_labels[i] = label(radio_panel, 10, 4 + RADIO_ROW_HEIGHT * i, 196,
-            i == 1 ? &lv_font_montserrat_20 : &fmo_channel_font, WHITE, values[i]);
-        lv_obj_set_height(radio_labels[i], lv_obj_get_style_text_font(radio_labels[i], 0)->line_height);
-        center_ink(radio_labels[i], 4 + RADIO_ROW_HEIGHT * i, RADIO_ROW_HEIGHT, 'H');
+    qso_panel = rect(screen, 12, QSO_TOP, 216, 129, BLACK);
+    lv_obj_set_style_border_color(qso_panel, lv_color_hex(ORANGE), 0);
+    lv_obj_set_style_border_width(qso_panel, 1, 0);
+    lv_obj_set_style_radius(qso_panel, 8, 0);
+    lv_obj_t *history_title = label(qso_panel, 10, 8, 196, &fmo_channel_font, ORANGE, "QSO");
+    center_ink(history_title, 8, 16, 'H');
+    for (unsigned i = 0; i < FMO_HISTORY_COUNT; ++i) {
+        int top = QSO_ROWS_TOP + QSO_ROW_HEIGHT * i;
+        qso_labels[i] = label(qso_panel, 10, top, 196,
+                             &fmo_callsign_bold_14, MUTED, "--");
+        lv_label_set_long_mode(qso_labels[i], LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_height(qso_labels[i], fmo_callsign_bold_14.line_height);
+        center_ink(qso_labels[i], top, QSO_TEXT_HEIGHT, 'H');
+        memcpy(qso_times[i], "---------- --:--:--", sizeof(qso_times[i]));
     }
+    lv_obj_add_event_cb(qso_panel, draw_qso_times, LV_EVENT_DRAW_MAIN_END, NULL);
     air_label = label(screen, 12, AIR_TOP, 216, &fmo_channel_font, MUTED, "等待电台发言");
-    center_ink(air_label, AIR_TOP, 24, 'H');
+    center_ink(air_label, AIR_TOP, AIR_HEIGHT, 'H');
     callsign_label = label(screen, 12, CALLSIGN_TOP, 216, &fmo_callsign_bold_32, WHITE, "--");
     lv_label_set_long_mode(callsign_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    center_ink(callsign_label, CALLSIGN_TOP, 36, 'H');
+    center_ink(callsign_label, CALLSIGN_TOP, 32, 'H');
+    grid_label = label(screen, 12, CALLSIGN_TOP, 80, &fmo_channel_font, GRID_COLOR, "");
+    lv_obj_add_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
     audio_bar_width = 0;
     lv_obj_add_event_cb(screen, draw_audio_bar, LV_EVENT_DRAW_MAIN_END, NULL);
     fmo_audio_meter_reset(&audio_meter);
     audio_meter_enabled = false;
-    hint_label = label(screen, 12, FOOTER_TOP, 216, &fmo_channel_font, MUTED, "音频:开50%  长按OK:配网");
-    center_ink(hint_label, FOOTER_TOP, 24, 'H');
+    hint_label = label(screen, 12, FOOTER_TOP, 216, &fmo_channel_font, MUTED,
+                       "音频: 50%  长按OK: 配网");
+    lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, 0);
+    center_ink(hint_label, FOOTER_TOP, 18, 'H');
 }
 
 void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
@@ -386,39 +452,57 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     text(air_label, air);
     color(air_label, speaking || setup ? ORANGE : MUTED);
     text(callsign_label, call);
-    color(callsign_label, speaking ? ORANGE : WHITE);
+    color(callsign_label, speaking ? (s->speaker_cross_server ? CROSS_SERVER_COLOR : ORANGE) : WHITE);
     /* Use real bold glyphs for callsigns; keep setup passwords in regular text.
      * Measure the selected weight before fitting long suffixes at 20px. */
     const lv_font_t *large = setup ? &lv_font_montserrat_32 : &fmo_callsign_bold_32;
     const lv_font_t *small = setup ? &lv_font_montserrat_20 : &fmo_callsign_bold_20;
-    lv_point_t size;
+    /* A release retains the last speaker's grid; the next start replaces it,
+     * including clearing it when that talker supplies no grid. */
+    const char *grid = !setup && live && s->last_speaker[0] ? s->grid : "";
+    lv_point_t grid_size = {0}, size;
+    if (grid[0]) lv_text_get_size(&grid_size, grid, &fmo_channel_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int call_space = 216 - (grid[0] ? grid_size.x + 8 : 0);
     lv_text_get_size(&size, call, large, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    const lv_font_t *font = size.x > 216 ? small : large;
+    const lv_font_t *font = size.x > call_space ? small : large;
     if (lv_obj_get_style_text_font(callsign_label, 0) != font)
         lv_obj_set_style_text_font(callsign_label, font, 0);
-    center_ink(callsign_label, CALLSIGN_TOP, 36, 'H');
-    bool radio_online = !setup && !error[0] && s->wifi_connected && s->control_connected;
-    const fmo_radio_profile_t *r = &s->radio;
-    text(radio_labels[0], radio_online && r->device_name[0] ? r->device_name : "--");
-    if (radio_online && r->frequency_100hz)
-        snprintf(buffer, sizeof(buffer), "%" PRIu32 ".%04" PRIu32 " MHz",
-                 r->frequency_100hz / 10000, r->frequency_100hz % 10000);
-    else snprintf(buffer, sizeof(buffer), "-- MHz");
-    text(radio_labels[1], buffer);
-    text(radio_labels[2], radio_online && r->antenna[0] ? r->antenna : "--");
-    if (radio_online && r->height_valid)
-        snprintf(buffer, sizeof(buffer), "高度: %" PRIu32 " m", r->antenna_height_m);
-    else snprintf(buffer, sizeof(buffer), "高度: -- m");
-    text(radio_labels[3], buffer);
-    for (unsigned i = 0; i < 4; ++i) {
-        color(radio_labels[i], radio_online ? WHITE : MUTED);
-        center_ink(radio_labels[i], 4 + RADIO_ROW_HEIGHT * i, RADIO_ROW_HEIGHT, 'H');
+    lv_text_get_size(&size, call, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int call_width = grid[0] && size.x < call_space ? size.x : call_space;
+    lv_obj_set_width(callsign_label, call_width);
+    int ink_bottom = center_ink(callsign_label, CALLSIGN_TOP, 32, 'H');
+    text(grid_label, grid);
+    if (grid[0]) {
+        lv_obj_remove_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_x(grid_label, 12 + call_width + 8);
+        lv_obj_set_width(grid_label, grid_size.x);
+        int grid_bottom = center_ink(grid_label, CALLSIGN_TOP, 32, 'H');
+        if (grid_bottom > ink_bottom) ink_bottom = grid_bottom;
+    } else lv_obj_add_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
+    position_audio_bar(ink_bottom);
+    bool history_online = !setup && !error[0] && s->wifi_connected && s->events_connected;
+    for (unsigned i = 0; i < FMO_HISTORY_COUNT; ++i) {
+        bool present = history_online && i < s->history.count;
+        char stamp[20];
+        if (present) fmo_clock_format_history(s->history.entries[i].timestamp, stamp);
+        else memcpy(stamp, "---------- --:--:--", sizeof(stamp));
+        text(qso_labels[i], present ? s->history.entries[i].callsign : "--");
+        if (strcmp(qso_times[i], stamp)) {
+            memcpy(qso_times[i], stamp, sizeof(stamp));
+            lv_obj_invalidate(qso_panel);
+        }
+        color(qso_labels[i], present ? WHITE : MUTED);
+        int top = QSO_ROWS_TOP + QSO_ROW_HEIGHT * i;
+        center_ink(qso_labels[i], top, QSO_TEXT_HEIGHT, 'H');
     }
-    if (setup) snprintf(buffer, sizeof(buffer), "打开 192.168.9.1");
-    else snprintf(buffer, sizeof(buffer), "音频:%s%u%%  长按OK:配网", controls->audio_enabled ? "开" : "关",
-                  controls->volume);
-    text(hint_label, buffer);
+    if (setup) {
+        text(hint_label, "浏览器: 192.168.9.1");
+    } else {
+        snprintf(buffer, sizeof(buffer), "音频: %u%%  长按OK: 配网",
+                 controls->audio_enabled ? controls->volume : 0);
+        text(hint_label, buffer);
+    }
     center_ink(link_label, LINK_TOP, LINK_HEIGHT, 'H');
-    center_ink(air_label, AIR_TOP, 24, 'H');
-    center_ink(hint_label, FOOTER_TOP, 24, 'H');
+    center_ink(air_label, AIR_TOP, AIR_HEIGHT, 'H');
+    center_ink(hint_label, FOOTER_TOP, 18, 'H');
 }

@@ -3,7 +3,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define FMO_WS_MESSAGE_CAPACITY 768
+/* FMO also pushes 20-entry qso/history lists (953 bytes observed).
+ * Leave room for longer callsigns while bounding both socket buffers. */
+#define FMO_WS_MESSAGE_CAPACITY 2048
 typedef struct {
     char text[FMO_WS_MESSAGE_CAPACITY];
     size_t length;

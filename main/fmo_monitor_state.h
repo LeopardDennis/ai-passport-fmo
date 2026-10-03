@@ -7,24 +7,26 @@
 #define FMO_CHANNEL_NAME_MAX 31
 #define FMO_GRID_MAX 11
 
-/* Read-only physical radio configuration from the connected FMO device.
- * Frequency is in 100 Hz steps (four decimal places in MHz), height in metres. */
+#define FMO_HISTORY_COUNT 3
 typedef struct {
-    char device_name[32];
-    char antenna[48];
-    uint32_t frequency_100hz;
-    uint32_t antenna_height_m;
-    bool height_valid;
-} fmo_radio_profile_t;
+    char callsign[FMO_CALLSIGN_MAX + 1];
+    int64_t timestamp;
+} fmo_history_entry_t;
+/* Most recent FMO event history, newest first; independent of live PTT state. */
+typedef struct {
+    fmo_history_entry_t entries[FMO_HISTORY_COUNT];
+    unsigned count;
+} fmo_history_t;
 
 typedef struct {
-    fmo_radio_profile_t radio;
+    fmo_history_t history;
     bool wifi_connected;
     bool events_connected;
     bool control_connected;
     bool channel_valid;
     bool speaking;
     bool speaker_is_host;
+    bool speaker_cross_server;
     uint32_t channel_uid;
     uint64_t last_speaker_ms;
     uint64_t channel_confirmed_ms;
@@ -44,4 +46,4 @@ void fmo_monitor_invalidate_channel(fmo_monitor_state_t *state);
 /* An empty/null callsign with speaking=false is an explicit idle release. */
 void fmo_monitor_apply_speaker(fmo_monitor_state_t *state,
                                const char *callsign, const char *grid,
-                               bool speaking, bool is_host, uint64_t now_ms);
+                               bool speaking, bool is_host, bool cross_server, uint64_t now_ms);

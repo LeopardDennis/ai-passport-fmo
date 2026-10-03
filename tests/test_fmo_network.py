@@ -33,29 +33,36 @@ def run():
     header = (ROOT / "main/fmo_network.h").read_text()
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
-        "update_clock_service", "request_radio_profile", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_message", "request_current_channel", "cleanup_wifi", "prepare_network", "post_link"))
+        "update_clock_service", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "cleanup_wifi", "prepare_network", "post_link"))
     preamble = r'''
 #include "fmo_monitor_state.h"
 #include "fmo_text.h"
 #include "fmo_link_policy.h"
+#include "fmo_ws_rx.h"
 #include "cJSON.h"
 #include <assert.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <string.h>
 #define portMAX_DELAY 0
 #define ESP_LOGW(...) ((void)0)
 typedef enum { FMO_SOCKET_EVENTS, FMO_SOCKET_CONTROL } fmo_socket_kind_t;
+typedef struct { fmo_socket_kind_t kind; int client; fmo_ws_rx_t rx; } fmo_socket_t;
+typedef struct {
+    int data_len, payload_len, payload_offset;
+    const char *data_ptr;
+    uint8_t op_code;
+    bool fin;
+} esp_websocket_event_data_t;
 '''
     stubs = r'''
 static fmo_snapshot_t s_snapshot, published;
 static int s_state_lock, s_update_queue, locked, refreshes;
 static bool s_query_pending;
 static uint32_t s_speaker_revision, s_query_revision;
-static uint64_t clock_ms = 10000, s_query_ms, s_radio_query_ms;
-static bool s_radio_requested;
+static uint64_t clock_ms = 10000, s_query_ms;
 static bool s_clock_initialized, s_clock_online;
-#define FMO_RADIO_REFRESH_MS 30000
 static uint64_t now_ms(void) { return clock_ms; }
 #define pdMS_TO_TICKS(x) (x)
 #define pdTRUE 1
@@ -70,7 +77,7 @@ static int esp_netif_sntp_init(const esp_sntp_config_t *config) {
     ++clock_inits;return clock_fail ? -1 : ESP_OK;
 }
 static int esp_netif_sntp_start(void) { ++clock_restarts;return clock_fail ? -1 : ESP_OK; }
-static struct {int client;} s_control_socket = {1};
+static fmo_socket_t s_control_socket = {.kind=FMO_SOCKET_CONTROL, .client=1};
 static int sends, short_send;
 static char last_request[128];
 static int esp_websocket_client_is_connected(int client) { return client; }
@@ -276,52 +283,166 @@ int main(void) {
     parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL43);
     assert(s_snapshot.state.speaking && s_snapshot.state.channel_uid==42);
 
-    // Real config responses: MHz units, Chinese antenna/name and valid zero height.
+    // Local config replies never describe the remote speaker's equipment.
     short_send=0; link.type=FMO_UPDATE_CONTROL_LINK; link.connected=true; post_update(&link);
     query(); parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL42);
     parse_fmo_message(FMO_SOCKET_EVENTS, START);
     query(); uint32_t radio_revision=s_speaker_revision;
-    const char *profile[] = {
-        "{\"type\":\"config\",\"subType\":\"getUserPhyDeviceNameResponse\",\"data\":{\"deviceName\":\"QUANSHENG\"}}",
+    int before_local=refreshes;
+    const char *local[] = {
+        "{\"type\":\"config\",\"subType\":\"getUserPhyDeviceNameResponse\",\"data\":{\"deviceName\":\"LOCAL RADIO\"}}",
         "{\"type\":\"config\",\"subType\":\"getUserPhyFreqResponse\",\"data\":{\"freq\":439.875}}",
-        "{\"type\":\"config\",\"subType\":\"getUserPhyAntResponse\",\"data\":{\"ant\":\"示例GP\"}}",
+        "{\"type\":\"config\",\"subType\":\"getUserPhyAntResponse\",\"data\":{\"ant\":\"LOCAL GP\"}}",
         "{\"type\":\"config\",\"subType\":\"getUserPhyAntHeightResponse\",\"data\":{\"height\":63}}"
     };
-    for(unsigned i=0;i<4;++i)parse_fmo_message(FMO_SOCKET_CONTROL,profile[i]);
-    assert(!strcmp(published.state.radio.device_name,"QUANSHENG"));
-    assert(!strcmp(published.state.radio.antenna,"示例GP"));
-    assert(published.state.radio.frequency_100hz==4398750);
-    assert(published.state.radio.height_valid && published.state.radio.antenna_height_m==63);
-    assert(published.state.channel_valid && published.state.speaking);
-    assert(s_query_pending && s_speaker_revision==radio_revision);
-    parse_fmo_message(FMO_SOCKET_CONTROL,
-        "{\"type\":\"config\",\"subType\":\"getUserPhyAntHeightResponse\",\"data\":{\"height\":0}}");
-    assert(published.state.radio.height_valid && published.state.radio.antenna_height_m==0);
-    const char *bad_profile[] = {
-        "{\"type\":\"config\",\"subType\":\"getUserPhyFreqResponse\",\"data\":{\"freq\":1001}}",
-        "{\"type\":\"config\",\"subType\":\"getUserPhyAntHeightResponse\",\"data\":{\"height\":1.5}}",
-        "{\"type\":\"config\",\"subType\":\"getUserPhyDeviceNameResponse\",\"data\":{\"deviceName\":12}}",
-        "{\"type\":\"config\",\"subType\":\"getUserPhyAntResponse\",\"data\":{\"ant\":\"bad\\ntext\"}}"
+    for (unsigned i=0;i<4;++i) parse_fmo_message(FMO_SOCKET_CONTROL,local[i]);
+    assert(!published.state.history.count && s_query_pending);
+    assert(published.state.speaking && published.state.channel_valid);
+    assert(s_speaker_revision==radio_revision && refreshes==before_local);
+    // Real FMO pushes a 20-entry history after speech: observed 953 bytes,
+    // larger than the old 768-byte assembler. Exercise the production receive
+    // path, including longer legal callsigns and transport/WS fragmentation.
+    fmo_socket_t events = {.kind=FMO_SOCKET_EVENTS};
+    for (unsigned width=7; width<=15; width+=8) {
+        char history[4096];
+        size_t length=(size_t)snprintf(history,sizeof(history),
+            "{\"type\":\"qso\",\"subType\":\"history\",\"data\":[");
+        for (unsigned i=0;i<20;++i) {
+            char call[16]; memset(call,'A',width); call[width]='\0';
+            int added=snprintf(history+length,sizeof(history)-length,
+                "%s{\"callsign\":\"%s\",\"utcTime\":1800000000}",i ? "," : "",call);
+            assert(added>0 && (size_t)added<sizeof(history)-length);
+            length+=(size_t)added;
+        }
+        assert(length+3<sizeof(history));
+        memcpy(history+length,"]}",3); length+=2;
+        assert(length>768 && (width==7 || length>1024));
+        for (unsigned idle=0;idle<2;++idle) {
+            parse_fmo_message(FMO_SOCKET_EVENTS,START);
+            query(); parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+            if (idle) parse_fmo_message(FMO_SOCKET_EVENTS,releases[0]);
+            query();
+            fmo_snapshot_t before_history=s_snapshot;
+            uint32_t revision=s_speaker_revision, query_revision=s_query_revision;
+            int before=refreshes;
+            for (unsigned split=0;split<3;++split) {
+                before_history=s_snapshot;
+                esp_websocket_event_data_t frame={
+                    .op_code=1,.fin=true,.payload_len=(int)length,
+                    .data_ptr=history,.data_len=(int)length
+                };
+                if (split) {
+                    const size_t first=512;
+                    frame.data_len=(int)first;
+                    if (split==2) { frame.fin=false;frame.payload_len=(int)first; }
+                    receive_fragment(&events,&frame);
+                    assert(!memcmp(&s_snapshot,&before_history,sizeof(s_snapshot)));
+                    esp_websocket_event_data_t ping={.op_code=9,.fin=true};
+                    receive_fragment(&events,&ping);
+                    frame.fin=true;frame.data_ptr=history+first;
+                    frame.data_len=(int)(length-first);
+                    if (split==2) { frame.op_code=0;frame.payload_len=frame.data_len; }
+                    else frame.payload_offset=(int)first;
+                }
+                receive_fragment(&events,&frame);
+                assert(s_snapshot.state.history.count==FMO_HISTORY_COUNT);
+                assert(strlen(s_snapshot.state.history.entries[0].callsign)==width);
+                assert(s_snapshot.state.history.entries[FMO_HISTORY_COUNT-1].timestamp==1800000000);
+                fmo_snapshot_t after_history=s_snapshot;
+                after_history.state.history=before_history.state.history;
+                assert(!memcmp(&after_history,&before_history,sizeof(s_snapshot)));
+                assert(refreshes==before && s_speaker_revision==revision);
+                assert(s_query_pending && s_query_revision==query_revision);
+            }
+            parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+            // Subsequent PTT release still goes through the same assembler.
+            esp_websocket_event_data_t release={.op_code=1,.fin=true,
+                .payload_len=(int)strlen(releases[0]),.data_len=(int)strlen(releases[0]),
+                .data_ptr=releases[0]};
+            receive_fragment(&events,&release);
+            assert(!published.state.speaking && published.state.channel_valid);
+            assert(!strcmp(published.state.last_speaker,"BG5ESN"));
+        }
+    }
+    // Truly oversized/invalid live data must still clear a potentially lost PTT release.
+    parse_fmo_message(FMO_SOCKET_EVENTS,START);
+    query(); parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    char oversized[FMO_WS_MESSAGE_CAPACITY]; memset(oversized,'x',sizeof(oversized));
+    esp_websocket_event_data_t bad_frame={.op_code=1,.fin=true,
+        .payload_len=sizeof(oversized),.data_len=sizeof(oversized),.data_ptr=oversized};
+    receive_fragment(&events,&bad_frame);
+    assert(!published.state.speaking && !published.state.channel_valid);
+    parse_fmo_message(FMO_SOCKET_EVENTS,START);
+    // History sorts independently, keeps repeated calls at distinct times,
+    // tolerates missing times and never changes channel/query/PTT ownership.
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);query();
+    uint32_t live_revision=s_speaker_revision;int before_hist=refreshes;
+    parse_fmo_message(FMO_SOCKET_EVENTS,
+        "{\"type\":\"qso\",\"subType\":\"history\",\"data\":["
+        "{\"callsign\":\"OLDEST\",\"utcTime\":1767272000},"
+        "{\"callsign\":\"REPEAT\",\"utcTime\":1767272280},"
+        "{\"callsign\":\"THIRD\",\"utcTime\":1767272100},"
+        "{\"callsign\":\"REPEAT\",\"utcTime\":1767272200},"
+        "{\"callsign\":\"FOURTH\",\"utcTime\":1767272050}]}");
+    assert(published.state.history.count==FMO_HISTORY_COUNT);
+    assert(!strcmp(published.state.history.entries[0].callsign,"REPEAT"));
+    assert(!strcmp(published.state.history.entries[1].callsign,"REPEAT"));
+    assert(published.state.history.entries[0].timestamp==1767272280);
+    assert(!strcmp(published.state.history.entries[FMO_HISTORY_COUNT-1].callsign,"THIRD"));
+    assert(published.state.speaking && published.state.channel_valid && s_query_pending);
+    assert(s_speaker_revision==live_revision && refreshes==before_hist);
+    fmo_history_t good_history=published.state.history;
+    const char *bad_history[]={
+        "{\"type\":\"qso\",\"subType\":\"history\",\"data\":{}}",
+        "{\"type\":\"qso\",\"subType\":\"history\",\"data\":[{\"callsign\":\"\"}]}",
+        "{\"type\":\"qso\",\"subType\":\"history\",\"data\":[{\"callsign\":\"bad\\u0000suffix\"}]}",
+        "{\"type\":\"qso\",\"subType\":\"history\",\"data\":[{\"callsign\":\"1234567890123456\"}]}"
     };
-    for(unsigned i=0;i<4;++i)parse_fmo_message(FMO_SOCKET_CONTROL,bad_profile[i]);
-    assert(!published.state.radio.frequency_100hz && !published.state.radio.height_valid);
-    assert(!published.state.radio.device_name[0] && !published.state.radio.antenna[0]);
-    assert(published.state.channel_valid && published.state.speaking && s_query_pending);
-    int radio_sends=sends;
-    assert(!request_radio_profile() && sends==radio_sends+4);
-    assert(strstr(last_request,"getUserPhyAntHeight") && !strstr(last_request,"set"));
-    assert(!request_radio_profile() && sends==radio_sends+4);
-    clock_ms+=29999; assert(!request_radio_profile() && sends==radio_sends+4);
-    ++clock_ms; assert(!request_radio_profile() && sends==radio_sends+8);
-    for(unsigned i=0;i<4;++i)parse_fmo_message(FMO_SOCKET_CONTROL,profile[i]);
-    link.connected=false;post_update(&link);
-    assert(!published.state.radio.device_name[0] && !s_radio_requested);
-    for(unsigned i=0;i<4;++i)parse_fmo_message(FMO_SOCKET_CONTROL,profile[i]);
-    assert(!published.state.radio.frequency_100hz && !published.state.radio.height_valid);
-    link.connected=true;post_update(&link);
-    assert(!request_radio_profile() && sends==radio_sends+12);
-    short_send=1;clock_ms+=30000;assert(request_radio_profile());
-    short_send=0;
+    for(unsigned i=0;i<sizeof(bad_history)/sizeof(bad_history[0]);++i)
+        parse_fmo_message(FMO_SOCKET_EVENTS,bad_history[i]);
+    assert(!memcmp(&published.state.history,&good_history,sizeof(good_history)));
+    assert(published.state.speaking && published.state.channel_valid && s_query_pending);
+    parse_fmo_message(FMO_SOCKET_EVENTS,
+        "{\"type\":\"qso\",\"subType\":\"history\",\"data\":[{\"callsign\":\"KNOWN\"},{\"callsign\":3},{\"callsign\":\"NEW\",\"utcTime\":1767272280}]}");
+    assert(published.state.history.count==2);
+    assert(!strcmp(published.state.history.entries[0].callsign,"NEW"));
+    assert(!published.state.history.entries[1].timestamp);
+    parse_fmo_message(FMO_SOCKET_CONTROL,
+        "{\"type\":\"qso\",\"subType\":\"history\",\"data\":[]}");
+    assert(published.state.history.count==2); // Wrong socket must not clear it.
+    parse_fmo_message(FMO_SOCKET_EVENTS,
+        "{\"type\":\"qso\",\"subType\":\"history\",\"data\":[]}");
+    assert(!published.state.history.count);
+    link.type=FMO_UPDATE_EVENTS_LINK;link.connected=false;post_update(&link);
+    parse_fmo_message(FMO_SOCKET_EVENTS,
+        "{\"type\":\"qso\",\"subType\":\"history\",\"data\":[{\"callsign\":\"LATE\"}]}");
+    assert(!published.state.history.count);
+    link.connected=true;post_update(&link);query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    parse_fmo_message(FMO_SOCKET_EVENTS,START);
+    // Only true/1 enables cross-server color; optional malformed/missing flags
+    // must preserve the talker, channel and outstanding query ownership.
+    const char *cross_flags[]={"true","1","false","0","null","\"true\"","{}","2","0.5"};
+    for(unsigned i=0;i<sizeof(cross_flags)/sizeof(cross_flags[0]);++i) {
+        char message[256];
+        snprintf(message,sizeof(message),
+            "{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"BG5ESN\",\"isSpeaking\":true,\"grid\":\"PM01\",\"crossServer\":%s}}",cross_flags[i]);
+        query();uint32_t cross_revision=s_speaker_revision;int cross_refreshes=refreshes;
+        parse_fmo_message(FMO_SOCKET_EVENTS,message);
+        assert(published.state.speaker_cross_server==(i<2));
+        assert(published.state.speaking && published.state.channel_valid && s_query_pending);
+        assert(s_speaker_revision==cross_revision && refreshes==cross_refreshes);
+    }
+    parse_fmo_message(FMO_SOCKET_EVENTS,
+        "{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"BG5ESN\",\"isSpeaking\":true,\"crossServer\":true}}");
+    assert(published.state.speaker_cross_server);
+    parse_fmo_message(FMO_SOCKET_EVENTS,START); // Missing flag clears previous color.
+    assert(!published.state.speaker_cross_server && published.state.speaking);
+    parse_fmo_message(FMO_SOCKET_EVENTS,
+        "{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"BG5ESN\",\"isSpeaking\":true,\"grid\":\"PM01\",\"crossServer\":true}}");
+    parse_fmo_message(FMO_SOCKET_EVENTS,releases[0]);
+    assert(!published.state.speaker_cross_server && !published.state.speaking);
+    assert(!strcmp(published.state.grid,"PM01") && published.state.channel_valid);
+    parse_fmo_message(FMO_SOCKET_EVENTS,START);
     // Clock init is asynchronous and owned once; failures/reconnects stay independent of PTT.
     update_clock_service(false);assert(clock_inits==0);
     clock_fail=1;update_clock_service(true);
@@ -338,7 +459,7 @@ int main(void) {
     // Failed initialization before Wi-Fi init still releases the STA netif.
     s_wifi_initialized=false;s_wifi_handler=s_ip_handler=NULL;s_station=&station_handle;
     cleanup_wifi();assert(unregistered==2 && destroyed==2 && cleanups==1 && !s_station);
-    puts("FMO network parser: PASS (radio metadata, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");
+    puts("FMO network parser: PASS (cross-server flags/color lifecycle, recent-three history/sorting/isolation, large history receive/fragmentation, local profile exclusion, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");
 }
 '''
     with tempfile.TemporaryDirectory(prefix="fmo-network-test-") as tmp:
@@ -348,7 +469,7 @@ int main(void) {
         subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                         "-I" + str(ROOT / "main"), "-I" + str(cjson), str(file),
                         str(cjson / "cJSON.c"), str(ROOT / "main/fmo_monitor_state.c"),
-                        str(ROOT / "main/fmo_text.c"), "-lm", "-o", str(binary)], check=True)
+                        str(ROOT / "main/fmo_text.c"), str(ROOT / "main/fmo_ws_rx.c"), "-lm", "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
 
 

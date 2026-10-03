@@ -6,17 +6,19 @@
 
 This firmware turns a FoloToy AI Passport into a small connected status display
 for a local FMO (NFM Over Internet) device. It shows the selected FMO channel,
-the callsign currently speaking, the last-heard callsign while idle, radio
-configuration, connection state, and battery level.
+the callsign currently speaking, the last-heard callsign while idle, the three most recent
+contact records, connection state, and battery level.
 
 ## How it works
 
 The monitor uses the local web interface exposed by an FMO device:
 
 - `ws://<host>:<port>/events` supplies `qso/callsign` events with `callsign`,
-  `isSpeaking`, `isHost`, and optional `grid` fields.
+  `isSpeaking`, `isHost`, and optional `grid` / `crossServer` fields.
 - `ws://<host>:<port>/ws` receives a periodic
   `station/getCurrent` request so the display can show the selected channel.
+- `qso/history` on `/events` supplies recent callsigns and UTC timestamps;
+  the monitor displays the newest three records without querying saved-log details.
 
 The optional `ws://<host>:<port>/audio` connection receives conversation audio.
 All enabled sockets reconnect automatically. No FMO device certificate or private key
@@ -27,8 +29,10 @@ it does not act as a virtual FMO radio or connect directly to an FMO MQTT server
 
 The portrait UI uses black, orange and white based on the supplied FMO reference
 images (not an official color specification). The large callsign belongs to the
-active speaker: bold orange while speaking, bold white for the last-heard callsign while
-idle. Grid coordinates, elapsed-time counters and station/host prefixes are hidden.
+active speaker: bold orange for ordinary speech, red when `crossServer` is true
+(or 1), and bold white for the last-heard callsign while
+idle. The grid follows the large callsign in smaller gray text and remains after
+release until the next speaker replaces it; missing grids are hidden. Elapsed-time counters and station/host prefixes are hidden.
 The thin yellow bar shows the RMS strength of conversation PCM sent to playback,
 with a quick rise and smooth fall. It uses the source audio level independently
 of speaker volume and clears when muted, disconnected, or viewing setup/menus.
@@ -41,25 +45,28 @@ red at 20% or below, and shows an outlined unknown state when SOC is unavailable
 It does not infer charging. Channel and callsign text is centered using visible
 glyph bounds, including smaller fonts for long callsigns and setup passwords.
 
-The portrait monitor includes an orange outlined radio panel with four rows:
-configured device name, frequency in MHz (four decimal places), antenna model,
-and antenna height in metres. Values come from the connected FMO device's
-`config/getUserPhyDeviceName`, `getUserPhyFreq`, `getUserPhyAnt`, and
-`getUserPhyAntHeight` responses. They describe that device's local radio
-configuration, not per-speaker equipment or live RF measurements. Reads run
-on connection and every 30 seconds, independently of speech/channel queries.
-Unset names/antenna or zero/unavailable frequency show `--`; a confirmed zero
-height shows `0 m`. Wi-Fi/control loss clears the panel until fresh responses
-arrive. Optional invalid metadata does not clear a current PTT or channel.
-Long name/model rows stay on one line with an ellipsis.
+The yellow panel is titled `QSO` and shows the three most recent contacts reported
+by FMO, newest first. Each record uses two lines: a white bold callsign followed
+by its Beijing date/time (`YYYY-MM-DD HH:MM:SS`) in regular gray text.
+Repeated callsigns at different times
+remain separate contacts. Missing slots/times show dashes. History updates only
+when FMO pushes `qso/history`; it does not overwrite the live callsign, speech
+state or channel-query ownership. Losing Wi-Fi/event connectivity clears history;
+control-query delays do not clear it. The protocol does not supply per-record
+frequency, mode, remarks or grid; saved QSO details and local `config/getUserPhy*`
+settings are not queried for these rows. Status, bold callsign and the yellow
+PCM level bar remain above the panel. Status reads speaking during a transmission
+and last contact after release. The speaker grid is shown beside the callsign
+in a separate small gray label, retained after release until the next speaker;
+long callsigns scroll within
+the remaining width without overlapping it.
 
 The header shows the current time between FMO and the battery as `HH:MM`, in
 Beijing time (UTC+8). Wi-Fi starts a non-blocking SNTP service using
 `pool.ntp.org`; before the system clock is valid it shows `--:--`. Reconnection
 restarts synchronization without allocating another service. An already synced
 clock continues during a network interruption, and wake-up redraws the current
-minute. Time synchronization requires access to the NTP server. Grid coordinates
-and separate transmit/receive frequencies are not displayed.
+minute. Time synchronization requires access to the NTP server. Separate transmit/receive frequencies are not displayed.
 
 Conversation audio plays automatically after the FMO event/control connections
 are ready, at 50% volume by default. The `/audio` interface supplies 8 kHz,
@@ -69,9 +76,9 @@ short buffering, underrun silence and bounded latency by dropping oldest samples
 on overflow. Muting or losing connectivity clears queued audio and closes only
 the audio socket; playback resumes with fresh data and a silent DMA prime.
 Audio continues while the LCD sleeps. No microphone capture, recording or
-transmit/PTT commands are added. The footer shows the audio switch, volume and long-OK setup hint together.
+transmit/PTT commands are added. The footer uses one centered row with the audio percentage and the long-OK setup hint. It displays the selected volume while audio is enabled and 0% while muted; clicking OK toggles sound and holding OK opens the setup/network menu.
 With no active speech, the middle shows the last-heard callsign in bold white;
-before the first contact it shows listening, `--` and a waiting-for-speech hint.
+before the first contact it shows `--` and a waiting-for-speech hint.
 Runtime sound settings reset on reboot; `CONFIG_FMO_VOLUME` sets initial volume.
 Audio/codec failures leave the monitor running. Physical playback, concurrent
 RAM/stack headroom and end-to-end latency still require device validation.
@@ -220,7 +227,7 @@ private keys, or unsanitized logs.
 - Confirm the current channel matches the FMO screen after boot and after an
   FMO-side channel change.
 - Key and release a radio and verify the speaking indicator,
-  bold callsign and last-heard transitions, with grid coordinates hidden.
+  bold callsign and last-heard transitions, with the gray grid retained after release and replaced by the next speaker.
   With a stable connection and confirmed channel, starts, talker changes and
   releases should not show the synchronization screen.
 - Leave both devices running through a Wi-Fi interruption and confirm automatic
@@ -264,7 +271,10 @@ private keys, or unsanitized logs.
   channel attribution is best effort: a switch clears ambiguous speech and waits
   for a later event; polling cannot provide an atomic channel/speaker snapshot.
 - The bounded text assembler handles transport chunks, continuation frames and
-  interleaved control frames. Oversized/invalid frames invalidate live speech.
+  interleaved control frames. Each text socket has a 2 KiB buffer so normal
+  20-entry QSO history lists fit and leave current speech/channel state intact.
+  Oversized/invalid frames still invalidate live speech; diagnostics include
+  socket and frame sizes without logging payloads.
 - Labels update only when content changes. Unused demo sources, BLE, and LVGL
   examples are excluded. Recovery BLE is in the permanent factory image.
 - Every minute, logs report internal heap minimum/largest block and coordinator

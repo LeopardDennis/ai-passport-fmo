@@ -59,14 +59,15 @@ characters or antialiasing are removed, and no new resource partition is require
 `fonts/Montserrat-Bold.ttf` is the unmodified Montserrat Bold source bundled in
 LVGL v9.5.0 (`tests/src/test_files/fonts/`), from the
 [Montserrat project](https://github.com/JulietaUla/Montserrat), licensed under
-SIL OFL 1.1 (`fonts/Montserrat-OFL.txt`). `fonts/fmo_callsign_bold_20.c` and
-`fonts/fmo_callsign_bold_32.c` contain 20/32 px, 4 bpp, uncompressed printable
+SIL OFL 1.1 (`fonts/Montserrat-OFL.txt`). `fonts/fmo_callsign_bold_14.c`, `fonts/fmo_callsign_bold_20.c` and
+`fonts/fmo_callsign_bold_32.c` contain 14/20/32 px, 4 bpp, uncompressed printable
 ASCII glyphs (U+0020-U+007E), including callsign suffixes and punctuation.
 Only these C files are linked, in both firmware and native preview. Setup
 passwords keep the regular built-in fonts; Chinese labels keep the existing font.
 Regenerate from the repository root with `lv_font_conv@1.5.3`:
 
 ```bash
+lv_font_conv --size 14 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_14.c
 lv_font_conv --size 20 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_20.c
 lv_font_conv --size 32 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_32.c
 ```

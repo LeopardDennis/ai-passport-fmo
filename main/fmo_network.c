@@ -34,7 +34,6 @@ static atomic_bool s_setup_active;
 static atomic_bool s_retry_requested;
 
 #define FMO_CHANNEL_REFRESH_MS 1000
-#define FMO_RADIO_REFRESH_MS 30000
 
 typedef enum {
     FMO_SOCKET_EVENTS,
@@ -53,8 +52,6 @@ static SemaphoreHandle_t s_state_lock;
 static fmo_snapshot_t s_snapshot;
 static uint32_t s_speaker_revision;
 static uint32_t s_query_revision;
-static uint64_t s_radio_query_ms;
-static bool s_radio_requested;
 static bool s_clock_initialized, s_clock_online;
 static bool s_query_pending;
 static uint64_t s_query_ms;
@@ -84,7 +81,9 @@ static void post_update(const fmo_update_t *update)
     switch (update->type) {
     case FMO_UPDATE_WIFI:
         fmo_monitor_set_wifi(state, update->connected);
-        if (!update->connected) { s_query_pending = false; s_radio_requested = false; }
+        if (!update->connected) {
+            s_query_pending = false;
+        }
         break;
     case FMO_UPDATE_EVENTS_LINK:
         fmo_monitor_set_events(state, update->connected && state->wifi_connected);
@@ -92,7 +91,6 @@ static void post_update(const fmo_update_t *update)
         refresh = update->connected;
         break;
     case FMO_UPDATE_CONTROL_LINK:
-        if (!update->connected) s_radio_requested = false;
         fmo_monitor_set_control(state, update->connected && state->wifi_connected);
         s_query_pending = false;
         refresh = update->connected;
@@ -122,25 +120,12 @@ static void post_update(const fmo_update_t *update)
                 refresh = true;
             }
             fmo_monitor_apply_speaker(state, update->callsign, update->grid,
-                                      update->speaking, update->is_host, now_ms());
+                                      update->speaking, update->is_host, update->cross_server, now_ms());
         }
         break;
-    case FMO_UPDATE_RADIO_NAME:
-    case FMO_UPDATE_RADIO_FREQUENCY:
-    case FMO_UPDATE_RADIO_ANTENNA:
-    case FMO_UPDATE_RADIO_HEIGHT:
-        if (state->wifi_connected && state->control_connected) {
-            if (update->type == FMO_UPDATE_RADIO_NAME)
-                fmo_text_copy_utf8(state->radio.device_name, sizeof(state->radio.device_name), update->text);
-            else if (update->type == FMO_UPDATE_RADIO_ANTENNA)
-                fmo_text_copy_utf8(state->radio.antenna, sizeof(state->radio.antenna), update->text);
-            else if (update->type == FMO_UPDATE_RADIO_FREQUENCY)
-                state->radio.frequency_100hz = update->valid ? update->value : 0;
-            else {
-                state->radio.antenna_height_m = update->valid ? update->value : 0;
-                state->radio.height_valid = update->valid;
-            }
-        }
+    case FMO_UPDATE_HISTORY:
+        if (state->wifi_connected && state->events_connected)
+            state->history = update->history;
         break;
     case FMO_UPDATE_ERROR:
         snprintf(s_snapshot.error, sizeof(s_snapshot.error), "%s", update->text);
@@ -187,6 +172,7 @@ static void invalidate_live_message(void)
     s_snapshot.state.speaking = false;
     s_snapshot.state.speaker[0] = '\0';
     s_snapshot.state.speaker_is_host = false;
+    s_snapshot.state.speaker_cross_server = false;
     ++s_speaker_revision;
     // Keep an outstanding query owned by this connection. Its old speaker
     // revision will reject the reply; timeout will drain the client if needed.
@@ -196,10 +182,39 @@ static void invalidate_live_message(void)
     fmo_network_request_refresh();
 }
 
+/* History is informational: invalid entries never clear the live talker/channel.
+ * Select the newest three by timestamp even if a future server changes ordering. */
+static void parse_fmo_history(const cJSON *data)
+{
+    if (!cJSON_IsArray(data)) return;
+    fmo_update_t update = {.type = FMO_UPDATE_HISTORY};
+    const cJSON *item;
+    cJSON_ArrayForEach(item, data) {
+        const cJSON *call = cJSON_GetObjectItemCaseSensitive(item, "callsign");
+        const cJSON *time = cJSON_GetObjectItemCaseSensitive(item, "utcTime");
+        fmo_history_entry_t entry = {0};
+        if (!cJSON_IsString(call) ||
+            !copy_ascii(entry.callsign, sizeof(entry.callsign), call->valuestring) ||
+            !entry.callsign[0]) continue;
+        if (cJSON_IsNumber(time) && time->valuedouble >= 946684800 &&
+            time->valuedouble < 4102444800 &&
+            time->valuedouble == (int64_t)time->valuedouble)
+            entry.timestamp = (int64_t)time->valuedouble;
+        unsigned pos = 0;
+        while (pos < update.history.count &&
+               update.history.entries[pos].timestamp >= entry.timestamp) ++pos;
+        if (pos >= FMO_HISTORY_COUNT) continue;
+        if (update.history.count < FMO_HISTORY_COUNT) ++update.history.count;
+        for (unsigned i = update.history.count - 1; i > pos; --i)
+            update.history.entries[i] = update.history.entries[i - 1];
+        update.history.entries[pos] = entry;
+    }
+    if (update.history.count || !cJSON_GetArraySize(data)) post_update(&update);
+}
+
 static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
 {
-    cJSON *root = fmo_text_json_has_nul(payload) ? NULL :
-        cJSON_ParseWithOpts(payload, NULL, true);
+    cJSON *root = cJSON_ParseWithOpts(payload, NULL, true);
     if (!root) {
         ESP_LOGW(TAG, "Ignored invalid JSON from %s socket",
                  kind == FMO_SOCKET_EVENTS ? "events" : "control");
@@ -212,6 +227,17 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
     if (!cJSON_IsString(type) || !cJSON_IsString(sub_type)) {
         cJSON_Delete(root);
+        return;
+    }
+    if (kind == FMO_SOCKET_EVENTS && !strcmp(type->valuestring, "qso") &&
+        !strcmp(sub_type->valuestring, "history")) {
+        if (!fmo_text_json_has_nul(payload)) parse_fmo_history(data);
+        cJSON_Delete(root);
+        return;
+    }
+    if (fmo_text_json_has_nul(payload)) {
+        cJSON_Delete(root);
+        invalidate_live_message();
         return;
     }
     if (!cJSON_IsObject(data)) {
@@ -230,6 +256,7 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
         const cJSON *grid = cJSON_GetObjectItemCaseSensitive(data, "grid");
         const cJSON *speaking = cJSON_GetObjectItemCaseSensitive(data, "isSpeaking");
         const cJSON *is_host = cJSON_GetObjectItemCaseSensitive(data, "isHost");
+        const cJSON *cross_server = cJSON_GetObjectItemCaseSensitive(data, "crossServer");
         if (cJSON_IsBool(speaking) || (cJSON_IsNumber(speaking) &&
             (speaking->valuedouble == 0 || speaking->valuedouble == 1))) {
             fmo_update_t update = {
@@ -249,39 +276,14 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
                 if (is_host) valid = valid && (cJSON_IsBool(is_host) || (cJSON_IsNumber(is_host) &&
                     (is_host->valuedouble == 0 || is_host->valuedouble == 1)));
                 update.is_host = json_bool(is_host);
+                /* Decorative metadata must never blank a valid PTT/channel.
+                 * Missing/unknown flag values use the ordinary speaker color. */
+                update.cross_server = cJSON_IsTrue(cross_server) ||
+                    (cJSON_IsNumber(cross_server) && cross_server->valuedouble == 1);
             }
             if (valid) post_update(&update);
             else invalidate_live_message();
         } else invalidate_live_message();
-    } else if (kind == FMO_SOCKET_CONTROL && strcmp(type->valuestring, "config") == 0) {
-        fmo_update_t update = {0};
-        const cJSON *field;
-        if (!strcmp(sub_type->valuestring, "getUserPhyDeviceNameResponse") ||
-            !strcmp(sub_type->valuestring, "getUserPhyAntResponse")) {
-            bool antenna = !strcmp(sub_type->valuestring, "getUserPhyAntResponse");
-            update.type = antenna ? FMO_UPDATE_RADIO_ANTENNA : FMO_UPDATE_RADIO_NAME;
-            field = cJSON_GetObjectItemCaseSensitive(data, antenna ? "ant" : "deviceName");
-            if (cJSON_IsString(field))
-                fmo_text_copy_utf8(update.text, sizeof(update.text), field->valuestring);
-        } else if (!strcmp(sub_type->valuestring, "getUserPhyFreqResponse")) {
-            update.type = FMO_UPDATE_RADIO_FREQUENCY;
-            field = cJSON_GetObjectItemCaseSensitive(data, "freq");
-            // FMO config uses MHz, not the Hz field in historical QSO logs.
-            if (cJSON_IsNumber(field) && field->valuedouble > 0 && field->valuedouble <= 1000) {
-                update.value = (uint32_t)(field->valuedouble * 10000 + 0.5);
-                update.valid = true;
-            }
-        } else if (!strcmp(sub_type->valuestring, "getUserPhyAntHeightResponse")) {
-            update.type = FMO_UPDATE_RADIO_HEIGHT;
-            field = cJSON_GetObjectItemCaseSensitive(data, "height");
-            if (cJSON_IsNumber(field) && field->valuedouble >= 0 && field->valuedouble <= 100000 &&
-                field->valuedouble == (uint32_t)field->valuedouble) {
-                update.value = (uint32_t)field->valuedouble;
-                update.valid = true;
-            }
-        } else { cJSON_Delete(root); return; }
-        // Optional metadata must not invalidate a current channel or PTT state.
-        post_update(&update);
     } else if (kind == FMO_SOCKET_CONTROL && strcmp(type->valuestring, "station") == 0 &&
                strcmp(sub_type->valuestring, "getCurrentResponse") == 0) {
         const cJSON *uid = cJSON_GetObjectItemCaseSensitive(data, "uid");
@@ -320,7 +322,11 @@ static void receive_fragment(fmo_socket_t *socket,
         reset_rx(socket);
         /* Discarding a message can lose a PTT release: stop claiming live state. */
         invalidate_live_message();
-        ESP_LOGW(TAG, "Dropped invalid or oversized WebSocket message");
+        ESP_LOGW(TAG, "Dropped invalid or oversized %s WebSocket message "
+                 "(frame=%d offset=%d chunk=%d opcode=%u capacity=%u)",
+                 socket->kind == FMO_SOCKET_EVENTS ? "events" : "control",
+                 data->payload_len, data->payload_offset, data->data_len,
+                 (unsigned)data->op_code, (unsigned)FMO_WS_MESSAGE_CAPACITY);
     }
 }
 
@@ -360,37 +366,6 @@ static bool request_current_channel(void)
         xQueueOverwrite(s_update_queue, &s_snapshot);
         xSemaphoreGive(s_state_lock);
         return true; // A partially sent query also has ambiguous reply ownership.
-    }
-    return false;
-}
-
-/* Optional configuration reads share the control socket. Missing replies do
- * not interrupt channel synchronization; retry at a low rate, never per PTT. */
-static bool request_radio_profile(void)
-{
-    if (!s_control_socket.client ||
-        !esp_websocket_client_is_connected(s_control_socket.client)) return false;
-    xSemaphoreTake(s_state_lock, portMAX_DELAY);
-    bool due = !s_radio_requested || now_ms() - s_radio_query_ms >= FMO_RADIO_REFRESH_MS;
-    if (due) {
-        s_radio_requested = true;
-        s_radio_query_ms = now_ms();
-    }
-    xSemaphoreGive(s_state_lock);
-    if (!due) return false;
-    static const char *const methods[] = {
-        "getUserPhyDeviceName", "getUserPhyFreq", "getUserPhyAnt", "getUserPhyAntHeight"
-    };
-    char request[96];
-    for (unsigned i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i) {
-        int length = snprintf(request, sizeof(request),
-            "{\"type\":\"config\",\"subType\":\"%s\",\"data\":{}}", methods[i]);
-        if (length <= 0 || (size_t)length >= sizeof(request) ||
-            esp_websocket_client_send_text(s_control_socket.client, request, length,
-                pdMS_TO_TICKS(FMO_LINK_IO_TIMEOUT_MS)) != length) {
-            ESP_LOGW(TAG, "Control reconnect: radio profile send failed at field %u", i);
-            return true;
-        }
     }
     return false;
 }
@@ -729,7 +704,7 @@ static void network_task(void *argument)
                 err = start_socket(&s_control_socket, control_uri);
                 if (err != ESP_OK) ESP_LOGW(TAG, "Control client creation failed; retrying");
             }
-            if (request_current_channel() || request_radio_profile())
+            if (request_current_channel())
                 stop_socket(&s_control_socket);
         }
         xSemaphoreTake(s_state_lock, portMAX_DELAY);

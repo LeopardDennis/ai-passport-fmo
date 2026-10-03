@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+- Fix false channel synchronization after normal QSO history pushes by increasing bounded text assembly from 768 bytes to 2 KiB per socket. A live 20-entry history message was 953 bytes; the old overflow path cleared speech/channel state despite connected sockets. Preserve invalid-frame recovery and log only socket/frame sizes; verify production parsing with transport chunks, continuation frames, interleaved pings and subsequent PTT release.
+- Replace local radio-configuration polling with the three newest FMO event-history contacts. The QSO panel shows white 14 px bold callsigns above full Beijing timestamps (YYYY-MM-DD HH:MM:SS) in regular gray text. Sort unsorted histories, retain repeated contacts and missing-slot placeholders, and keep history updates independent of live PTT/channel state. Render dates inside the panel to preserve the 24 KiB LVGL memory budget.
+- Place speaking/last-contact status, the bold callsign and retained gray grid above QSO. Show cross-server speech in red for crossServer true/1, ordinary speech in orange and last-heard callsigns in white; clear stale flags on release, speaker changes or link/channel reset. Fit callsigns within the remaining width and center the yellow PCM bar between visible text and QSO, repainting both bar positions when its height changes. Balance panel padding and use one centered footer row with audio percentage (0% when muted) and the long-OK setup hint.
+
 - Reduce premature reconnects during brief LAN delays: allow 10 seconds for a single channel query, 15 seconds for confirmed-channel freshness and 30 seconds for WebSocket pongs. Match control send waits to the 3-second transport timeout, retain delayed-reply ownership and log reconnect reasons. Keep radio panel, speech status and callsign rows fixed when data first arrives. Add delayed-response, hard-timeout and empty/populated-layout regressions. On-device reconnect recovery remains unverified.
 
 - Replace the fixed speech underline with a yellow PCM RMS audio-level bar, using

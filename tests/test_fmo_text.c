@@ -40,7 +40,7 @@ int main(void)
     fmo_monitor_state_t state = {0};
     fmo_monitor_set_channel(&state, 42, "一二三四五六七八九十十一十二十三");
     assert(!strcmp(state.channel_name, "一二三四五六七八九十"));
-    fmo_monitor_apply_speaker(&state, "BG5ESN", "PM01", true, false, 100);
+    fmo_monitor_apply_speaker(&state, "BG5ESN", "PM01", true, false, false, 100);
     fmo_monitor_set_channel(&state, 42, "安吉FMO中继");
     assert(state.speaking && !strcmp(state.channel_name, "安吉FMO中继"));
     fmo_monitor_set_channel(&state, 43, "上海");

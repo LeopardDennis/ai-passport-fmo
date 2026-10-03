@@ -26,11 +26,12 @@ void fmo_monitor_set_wifi(fmo_monitor_state_t *state, bool connected)
     if (!state) return;
     state->wifi_connected = connected;
     if (!connected) {
-        memset(&state->radio, 0, sizeof(state->radio));
         state->channel_valid = false;
+        memset(&state->history, 0, sizeof(state->history));
         state->events_connected = false;
         state->control_connected = false;
         state->speaking = false;
+        state->speaker_cross_server = false;
         state->speaker[0] = '\0';
         state->last_speaker[0] = '\0';
         state->grid[0] = '\0';
@@ -45,7 +46,9 @@ void fmo_monitor_set_events(fmo_monitor_state_t *state, bool connected)
     if (!state) return;
     state->events_connected = connected;
     if (!connected) {
+        memset(&state->history, 0, sizeof(state->history));
         state->speaking = false;
+        state->speaker_cross_server = false;
         state->speaker[0] = '\0';
     }
 }
@@ -56,7 +59,6 @@ void fmo_monitor_set_control(fmo_monitor_state_t *state, bool connected)
     state->control_connected = connected;
     if (!connected) {
         state->channel_valid = false;
-        memset(&state->radio, 0, sizeof(state->radio));
     }
 }
 
@@ -71,6 +73,7 @@ void fmo_monitor_set_channel(fmo_monitor_state_t *state, uint32_t uid,
     if (!state) return;
     if (state->channel_uid != uid) {
         state->speaking = false;
+        state->speaker_cross_server = false;
         state->speaker_is_host = false;
         state->speaker[0] = '\0';
         state->last_speaker[0] = '\0';
@@ -84,7 +87,7 @@ void fmo_monitor_set_channel(fmo_monitor_state_t *state, uint32_t uid,
 
 void fmo_monitor_apply_speaker(fmo_monitor_state_t *state,
                                const char *callsign, const char *grid,
-                               bool speaking, bool is_host, uint64_t now_ms)
+                               bool speaking, bool is_host, bool cross_server, uint64_t now_ms)
 {
     if (!state) return;
     if (!callsign) callsign = "";
@@ -96,12 +99,14 @@ void fmo_monitor_apply_speaker(fmo_monitor_state_t *state,
         copy_text(state->grid, sizeof(state->grid), grid);
         state->speaking = true;
         state->speaker_is_host = is_host;
+        state->speaker_cross_server = cross_server;
         state->last_speaker_ms = now_ms;
         return;
     }
 
     if (state->speaking && (!callsign[0] || strcmp(state->speaker, callsign) == 0)) {
         state->speaking = false;
+        state->speaker_cross_server = false;
         state->speaker[0] = '\0';
         state->last_speaker_ms = now_ms;
     }

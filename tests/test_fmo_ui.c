@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 LV_FONT_DECLARE(fmo_channel_font);
+LV_FONT_DECLARE(fmo_callsign_bold_14);
 LV_FONT_DECLARE(fmo_callsign_bold_20);
 LV_FONT_DECLARE(fmo_callsign_bold_32);
 static uint16_t pixels[240 * 320];
@@ -21,7 +22,8 @@ static lv_obj_t *find_text(lv_obj_t *parent, const char *text)
 {
     for (unsigned i = 0; i < lv_obj_get_child_count(parent); ++i) {
         lv_obj_t *child = lv_obj_get_child(parent, i);
-        if (lv_obj_check_type(child, &lv_label_class) && !strcmp(lv_label_get_text(child), text)) return child;
+        if (lv_obj_check_type(child, &lv_label_class) && !strcmp(lv_label_get_text(child), text) &&
+            lv_obj_get_style_text_font(child,0)!=&fmo_callsign_bold_14) return child;
         lv_obj_t *found = find_text(child, text);
         if (found) return found;
     }
@@ -32,6 +34,36 @@ static void verify(const char *value, uint32_t color)
     lv_obj_t *obj = find_text(lv_screen_active(), value);
     assert(obj);
     assert(lv_color_eq(lv_obj_get_style_text_color(obj, 0), lv_color_hex(color)));
+}
+
+static char drawn_dates[FMO_HISTORY_COUNT][20];
+static unsigned drawn_count;
+static void observe_qso_draw(lv_event_t *event)
+{
+    lv_draw_label_dsc_t *dsc = lv_draw_task_get_label_dsc(lv_event_get_draw_task(event));
+    if (!dsc || !dsc->text || strlen(dsc->text) != 19) return;
+    assert(dsc->font == &lv_font_montserrat_14); /* Time remains regular weight. */
+    assert(lv_color_eq(dsc->color,lv_color_hex(0x929292)));
+    lv_point_t size;
+    lv_text_get_size(&size,dsc->text,dsc->font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+    assert(size.x<=196);
+    assert(dsc->base.id1<FMO_HISTORY_COUNT);
+    memcpy(drawn_dates[dsc->base.id1],dsc->text,20);
+    drawn_count |= 1u << dsc->base.id1;
+}
+static void verify_dates(lv_display_t *display, const char *first, const char *last)
+{
+    lv_obj_t *panel=lv_obj_get_parent(find_text(lv_screen_active(),"QSO"));
+    drawn_count=0;
+    lv_obj_add_flag(panel,LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    lv_obj_add_event_cb(panel,observe_qso_draw,LV_EVENT_DRAW_TASK_ADDED,NULL);
+    lv_obj_invalidate(panel);
+    lv_refr_now(display);
+    lv_obj_remove_event_cb(panel,observe_qso_draw);
+    lv_obj_remove_flag(panel,LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    assert(drawn_count==((1u << FMO_HISTORY_COUNT)-1));
+    assert(!strcmp(drawn_dates[0],first));
+    assert(!strcmp(drawn_dates[FMO_HISTORY_COUNT-1],last));
 }
 
 static void verify_channel_center(void)
@@ -64,15 +96,15 @@ static void verify_connection_gap(void)
 
 static void verify_callsign_center(int top)
 {
-    int first = top + 36, last = top - 1;
-    for (int y = top; y < top + 36; ++y)
+    int first = top + 32, last = top - 1;
+    for (int y = top; y < top + 32; ++y)
         for (int x = 12; x < 228; ++x)
             if (pixels[y * 240 + x] != 0) {
                 if (y < first) first = y;
                 if (y > last) last = y;
             }
     assert(first <= last);
-    assert(abs((first - top) - (top + 35 - last)) <= 2);
+    assert(abs((first - top) - (top + 31 - last)) <= 2);
 }
 static void verify_clock_center(void)
 {
@@ -90,13 +122,17 @@ static void verify_clock_center(void)
 static int audio_bar_width(lv_display_t *display)
 {
     lv_refr_now(display);
-    int width = 0;
-    for (int x = 0; x < 240; ++x) {
-        if (pixels[289 * 240 + x]) {
-            assert(x >= 12 && x < 228);
-            ++width;
+    int count = 0;
+    for (int y = 116; y < 160; ++y) {
+        for (int x = 0; x < 240; ++x) {
+            if (pixels[y * 240 + x] == 0xFE80) { /* Yellow PCM bar, RGB565. */
+                assert(x >= 12 && x < 228);
+                ++count;
+            }
         }
     }
+    assert(count % 2 == 0);
+    int width = count / 2;
     return width;
 }
 
@@ -130,11 +166,14 @@ int main(int argc, char **argv)
     fmo_monitor_state_t state = {.wifi_connected=true, .events_connected=true,
         .control_connected=true, .channel_valid=true, .speaking=true,
         .channel_uid=42, .speaker="BG5ESN", .last_speaker="BG5ESN", .grid="PM01"};
-    state.radio = (fmo_radio_profile_t){.device_name="QUANSHENG",.antenna="示例GP",
-        .frequency_100hz=4398750,.antenna_height_m=63,.height_valid=true};
+    state.history = (fmo_history_t){.count=FMO_HISTORY_COUNT,.entries={
+        {.callsign="BG5ESN",.timestamp=1767272220},
+        {.callsign="BI1XYZ",.timestamp=1767272160},
+        {.callsign="BG1ABC",.timestamp=1767272100}}};
     fmo_monitor_set_channel(&state, 42, "安吉FMO中继");
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
-    assert(find_text(lv_screen_active(), "音频:开50%  长按OK:配网"));
+    assert(find_text(lv_screen_active(), "正在发言"));
+    assert(find_text(lv_screen_active(), "音频: 50%  长按OK: 配网"));
     /* Measure real rendered pixels: speech metadata alone must not light the
      * bar. PCM animates width and silence erases the old, longer rectangle. */
     assert(audio_bar_width(display) == 0);
@@ -152,7 +191,7 @@ int main(int argc, char **argv)
     assert(audio_bar_width(display) == 108);
     controls.audio_enabled=false;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
-    assert(find_text(lv_screen_active(), "音频:关50%  长按OK:配网"));
+    assert(find_text(lv_screen_active(), "音频: 0%  长按OK: 配网"));
     fmo_ui_set_audio_level(100, 12780);
     assert(audio_bar_width(display) == 0);
     controls.audio_enabled=true; controls.volume=0;
@@ -161,11 +200,11 @@ int main(int argc, char **argv)
     assert(audio_bar_width(display) == 0);
     controls.volume=100; controls.audio_enabled=true;
     fmo_ui_render(&state,"","","",82,12000,true,&controls);
-    assert(find_text(lv_screen_active(), "音频:开100%  长按OK:配网"));
+    assert(find_text(lv_screen_active(), "音频: 100%  长按OK: 配网"));
     lv_obj_t *refresh_link = find_text(lv_screen_active(), "FMO 已连接 已请求刷新");
     assert(refresh_link);
     lv_point_t hint_size;
-    lv_text_get_size(&hint_size, "音频:开100%  长按OK:配网", &fmo_channel_font,
+    lv_text_get_size(&hint_size, "音频: 100%  长按OK: 配网", &fmo_channel_font,
                      0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     assert(hint_size.x <= 216);
     lv_text_get_size(&hint_size, lv_label_get_text(refresh_link), &fmo_channel_font,
@@ -175,29 +214,61 @@ int main(int argc, char **argv)
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
     assert(find_text(lv_screen_active(), "安吉FMO中继"));
     verify("BG5ESN", 0xFF8A00);
-    assert(find_text(lv_screen_active(), "QUANSHENG"));
-    assert(find_text(lv_screen_active(), "439.8750 MHz"));
-    assert(find_text(lv_screen_active(), "示例GP"));
-    assert(find_text(lv_screen_active(), "高度: 63 m"));
-    state.radio.antenna_height_m=0;
+    state.speaker_cross_server=true;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
-    assert(find_text(lv_screen_active(),"高度: 0 m"));
-    state.radio.antenna_height_m=63;
+    verify("BG5ESN",0xF66969);
+    verify("PM01",0x929292);
+    state.speaker_cross_server=false;
+    fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    verify("BG5ESN",0xFF8A00);
+    assert(find_text(lv_screen_active(), "QSO"));
+    verify_dates(display,"2026-01-01 20:57:00","2026-01-01 20:55:00");
+    lv_obj_t *history_panel=lv_obj_get_parent(find_text(lv_screen_active(),"QSO"));
+    lv_obj_t *history_call=lv_obj_get_child(history_panel,1);
+    assert(!strcmp(lv_label_get_text(history_call),"BG5ESN"));
+    assert(lv_obj_get_style_text_font(history_call,0)==&fmo_callsign_bold_14);
+    assert(lv_color_eq(lv_obj_get_style_text_color(history_call,0),lv_color_hex(0xF4F4F4)));
+    state.channel_valid=false;
+    fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    verify_dates(display,"2026-01-01 20:57:00","2026-01-01 20:55:00");
+    state.channel_valid=true;
+    fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    verify("PM01",0x929292);
+    lv_obj_update_layout(lv_screen_active());
+    lv_obj_t *live_call=find_text(lv_screen_active(),"BG5ESN");
+    lv_obj_t *live_grid=find_text(lv_screen_active(),"PM01");
+    assert(lv_obj_get_style_text_font(live_grid,0)==&fmo_channel_font);
+    assert(lv_obj_get_x(live_grid)>=lv_obj_get_x(live_call)+lv_obj_get_width(live_call)+8);
+    assert(lv_obj_get_x(live_grid)+lv_obj_get_width(live_grid)<=228);
     assert(lv_obj_get_style_text_font(find_text(lv_screen_active(), "BG5ESN"), 0) == &fmo_callsign_bold_32);
-    assert(!find_text(lv_screen_active(), "PM01"));
+    assert(find_text(lv_screen_active(), "PM01"));
     assert(!find_text(lv_screen_active(), "电台 / PM01"));
     state.speaker_is_host = true;
+    state.speaker_cross_server = true;
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
-    assert(!find_text(lv_screen_active(), "PM01"));
+    assert(find_text(lv_screen_active(), "PM01"));
     assert(!find_text(lv_screen_active(), "本机 / PM01"));
-    fmo_monitor_apply_speaker(&state, "", "", false, false, 12000);
+    fmo_monitor_apply_speaker(&state, "", "", false, false, false, 12000);
     fmo_ui_render(&state, "", "", "", -1, 12000, false, &controls);
     verify("BG5ESN", 0xF4F4F4);
     assert(find_text(lv_screen_active(), "上次通联"));
     assert(find_text(lv_screen_active(), "安吉FMO中继"));
     assert(!find_text(lv_screen_active(), "等待频道同步"));
-    assert(!find_text(lv_screen_active(), "PM01"));
+    verify("PM01", 0x929292);
     assert(!find_text(lv_screen_active(), "PM01 / 0 秒前"));
+    fmo_ui_render(&state, "", "", "", -1, 72000, false, &controls);
+    verify("PM01", 0x929292); /* Retained beyond the former 30-second age. */
+    fmo_monitor_state_t last_contact = state;
+    fmo_monitor_apply_speaker(&state, "BI1XYZ", "ON80", true, false, false, 73000);
+    fmo_ui_render(&state, "", "", "", -1, 73000, false, &controls);
+    verify("ON80", 0x929292);
+    assert(!find_text(lv_screen_active(), "PM01"));
+    fmo_monitor_apply_speaker(&state, "BG1ABC", "", true, false, false, 74000);
+    fmo_ui_render(&state, "", "", "", -1, 74000, false, &controls);
+    assert(!find_text(lv_screen_active(), "ON80"));
+    assert(!find_text(lv_screen_active(), "PM01"));
+    state = last_contact;
+    fmo_ui_render(&state, "", "", "", -1, 12000, false, &controls);
     /* Audio may finish after the PTT-end event. Preserve its smooth tail. */
     fmo_ui_set_audio_level(100, 20000);
     fmo_ui_set_audio_level(100, 20080);
@@ -207,7 +278,7 @@ int main(int argc, char **argv)
     fmo_ui_set_audio_level(0, 20580);
     assert(audio_bar_width(display) == 0);
     fmo_ui_render(&state, "", "", "", -1, 60000, false, &controls);
-    assert(!find_text(lv_screen_active(), "PM01"));
+    verify("PM01", 0x929292);
     assert(!find_text(lv_screen_active(), "PM01 / 48 秒前"));
     assert(lv_obj_get_style_text_font(find_text(lv_screen_active(), "BG5ESN"), 0) == &fmo_callsign_bold_32);
     assert(find_text(lv_screen_active(), "--"));
@@ -224,24 +295,24 @@ int main(int argc, char **argv)
     /* Empty profile, initial idle and populated speech share fixed rows. */
     lv_obj_update_layout(lv_screen_active());
     lv_refr_now(display);
-    verify_callsign_center(245);
+    verify_callsign_center(116);
     lv_obj_t *callsign = find_text(lv_screen_active(), "BG5ESN");
     int call_y = lv_obj_get_y(callsign);
     int status_y = lv_obj_get_y(find_text(lv_screen_active(), "上次通联"));
-    lv_obj_t *profile = lv_obj_get_parent(find_text(lv_screen_active(), "QUANSHENG"));
+    lv_obj_t *profile = lv_obj_get_parent(find_text(lv_screen_active(), "QSO"));
     int profile_y = lv_obj_get_y(profile), profile_h = lv_obj_get_height(profile);
-    fmo_radio_profile_t saved_radio = state.radio;
-    memset(&state.radio, 0, sizeof(state.radio));
+    fmo_history_t saved_history = state.history;
+    memset(&state.history, 0, sizeof(state.history));
     state.last_speaker[0] = 0;
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     lv_obj_update_layout(lv_screen_active());
     lv_refr_now(display);
-    verify_callsign_center(245);
+    verify_callsign_center(116);
     lv_obj_t *idle_status = find_text(lv_screen_active(), "等待电台发言");
     assert(idle_status && lv_obj_get_y(idle_status) == status_y);
     assert(lv_obj_get_y(profile) == profile_y && lv_obj_get_height(profile) == profile_h);
     assert(!strcmp(lv_label_get_text(callsign), "--"));
-    state.radio = saved_radio;
+    state.history = saved_history;
     strcpy(state.last_speaker, "BG5ESN");
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     lv_obj_update_layout(lv_screen_active());
@@ -274,10 +345,13 @@ int main(int argc, char **argv)
     }
     fmo_controls_observe_setup(&controls, false);
     const char *ssid = "", *password = "", *error = "";
+    if (argc > 1 && !strcmp(argv[1],"cross")) {
+        fmo_monitor_apply_speaker(&state,"BG5ESN","PM01",true,false,true,12000);
+    }
     state.events_connected = true;
     bool meter_preview = argc > 1 && !strncmp(argv[1], "meter_", 6);
-    if (argc < 2 || !strcmp(argv[1], "onair") || !strcmp(argv[1], "muted") || meter_preview)
-        fmo_monitor_apply_speaker(&state, "BG5ESN", "PM01", true, false, 12000);
+    if (argc < 2 || !strcmp(argv[1], "onair") || !strcmp(argv[1], "muted") || !strcmp(argv[1], "lan") || meter_preview)
+        fmo_monitor_apply_speaker(&state, "BG5ESN", "PM01", true, false, false, 12000);
     if (argc > 1 && (!strcmp(argv[1], "setup") || !strcmp(argv[1], "setup_info"))) {
         ssid="FMO-Setup-TEST"; password="ABCDEF012345";
         fmo_controls_observe_setup(&controls, true);
@@ -288,14 +362,15 @@ int main(int argc, char **argv)
     }
     if (argc > 1 && !strcmp(argv[1], "offline")) state.wifi_connected = state.channel_valid = false;
     if (argc > 1 && !strcmp(argv[1], "long")) {
-        strcpy(state.radio.device_name,"QUANSHENG-1234567890");
-        strcpy(state.radio.antenna,"长型号测试天线名称玻璃钢GP");
+        strcpy(state.history.entries[0].callsign,"BG5ESN/12345678");
     }
     if (argc > 1 && !strcmp(argv[1], "rare")) fmo_monitor_set_channel(&state, 42, "龍龠龯");
-    if (argc > 1 && !strcmp(argv[1], "long")) strcpy(state.last_speaker, "BG5ESN/12345678");
+    if (argc > 1 && !strcmp(argv[1], "long")) {
+        fmo_monitor_apply_speaker(&state,"BG5ESN/12345678","PM01ABC1234",true,false, false,12000);
+    }
     if (argc > 1 && !strcmp(argv[1], "muted")) controls.audio_enabled=false;
     if (argc > 1 && (!strcmp(argv[1], "idle") || !strcmp(argv[1], "empty"))) state.last_speaker[0]=0;
-    if (argc > 1 && !strcmp(argv[1], "empty")) memset(&state.radio, 0, sizeof(state.radio));
+    if (argc > 1 && (!strcmp(argv[1], "empty") || !strcmp(argv[1], "lan"))) memset(&state.history, 0, sizeof(state.history));
     if (argc > 1 && !strcmp(argv[1], "error")) error="NETWORK START FAILED";
     fmo_ui_render(&state, error, ssid, password, 82, 12000, false, &controls);
     uint8_t preview_level = 0;
@@ -305,9 +380,7 @@ int main(int argc, char **argv)
     fmo_ui_set_audio_level(preview_level, 70000);
     fmo_ui_set_audio_level(preview_level, 70100);
     if (argc > 1 && !strcmp(argv[1], "offline")) {
-        assert(!find_text(lv_screen_active(),"QUANSHENG"));
-        assert(find_text(lv_screen_active(),"-- MHz"));
-        assert(find_text(lv_screen_active(),"高度: -- m"));
+        verify_dates(display,"---------- --:--:--","---------- --:--:--");
     }
     if (argc > 1 && !strcmp(argv[1], "long"))
         assert(lv_obj_get_style_text_font(find_text(lv_screen_active(), state.last_speaker), 0) == &fmo_callsign_bold_20);
@@ -317,16 +390,18 @@ int main(int argc, char **argv)
     if (controls.view == FMO_VIEW_MONITOR) {
         verify_channel_center();
         verify_connection_gap();
-        verify_callsign_center(245);
+        verify_callsign_center(116);
     }
     if (controls.view == FMO_VIEW_MONITOR && !ssid[0]) {
-        const char *footer = controls.audio_enabled ? "音频:开50%  长按OK:配网" : "音频:关50%  长按OK:配网";
+        char footer[80];
+        snprintf(footer,sizeof(footer),"音频: %u%%  长按OK: 配网",
+                 controls.audio_enabled ? controls.volume : 0);
         lv_obj_t *hint = find_text(lv_screen_active(), footer);
         assert(hint);
         lv_point_t size;
         lv_text_get_size(&size, footer, lv_obj_get_style_text_font(hint, 0),
                          0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        assert(size.x <= 216); /* Sound and setup hints must fit together. */
+        assert(size.x <= 216); /* Key actions must fit with no ellipsis. */
     }
     lv_mem_monitor_t memory;
     lv_mem_monitor(&memory);

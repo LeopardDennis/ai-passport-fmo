@@ -53,13 +53,14 @@
 `fonts/Montserrat-Bold.ttf` 是 LVGL v9.5.0 中 `tests/src/test_files/fonts/`
 携带的未修改 Montserrat Bold 源字体，来自
 [Montserrat 项目](https://github.com/JulietaUla/Montserrat)，使用 SIL OFL 1.1
-许可（`fonts/Montserrat-OFL.txt`）。`fonts/fmo_callsign_bold_20.c` 和
-`fonts/fmo_callsign_bold_32.c` 是 20／32 px、4 bpp、未压缩的可打印 ASCII
+许可（`fonts/Montserrat-OFL.txt`）。`fonts/fmo_callsign_bold_14.c`、`fonts/fmo_callsign_bold_20.c` 和
+`fonts/fmo_callsign_bold_32.c` 是 14／20／32 px、4 bpp、未压缩的可打印 ASCII
 字形（U+0020-U+007E），覆盖呼号后缀和标点。固件与原生预览只链接生成的 C 文件。
 配网密码保留内置常规字重，中文标签保留现有字库。
 在仓库根目录用 `lv_font_conv@1.5.3` 重新生成：
 
 ```bash
+lv_font_conv --size 14 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_14.c
 lv_font_conv --size 20 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_20.c
 lv_font_conv --size 32 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_32.c
 ```
