@@ -2,6 +2,7 @@
 #include "fmo_pcm.h"
 #include "fmo_audio_meter.h"
 #include "fmo_provision.h"
+#include "fmo_link_policy.h"
 #include "bsp_audio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -86,7 +87,9 @@ static esp_err_t start_stream(esp_websocket_client_handle_t *client)
     esp_websocket_client_config_t config = {
         .uri = uri, .buffer_size = 1024, .task_stack = 4096,
         .enable_close_reconnect = true, .reconnect_timeout_ms = 2000,
-        .network_timeout_ms = 3000, .ping_interval_sec = 5, .pingpong_timeout_sec = 10,
+        .network_timeout_ms = FMO_LINK_IO_TIMEOUT_MS,
+        .ping_interval_sec = FMO_LINK_PING_INTERVAL_SEC,
+        .pingpong_timeout_sec = FMO_LINK_PONG_TIMEOUT_SEC,
     };
     *client = esp_websocket_client_init(&config);
     if (!*client) return ESP_ERR_NO_MEM;

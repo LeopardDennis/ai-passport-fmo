@@ -7,6 +7,7 @@
 
 #include "demo_radio.h"
 #include "fmo_ws_rx.h"
+#include "fmo_link_policy.h"
 #include "fmo_text.h"
 #include "fmo_storage.h"
 #include "esp_timer.h"
@@ -33,7 +34,6 @@ static atomic_bool s_setup_active;
 static atomic_bool s_retry_requested;
 
 #define FMO_CHANNEL_REFRESH_MS 1000
-#define FMO_CHANNEL_MAX_AGE_MS 5000
 #define FMO_RADIO_REFRESH_MS 30000
 
 typedef enum {
@@ -333,10 +333,12 @@ static bool request_current_channel(void)
         "{\"type\":\"station\",\"subType\":\"getCurrent\",\"data\":{}}";
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
     if (s_query_pending) {
-        bool expired = now_ms() - s_query_ms >= 2000;
+        bool expired = now_ms() - s_query_ms >= FMO_CHANNEL_QUERY_TIMEOUT_MS;
         if (expired) {
             // The protocol has no request ID. Drain this client before sending
             // another query so a delayed reply cannot inherit new metadata.
+            ESP_LOGW(TAG, "Control reconnect: channel query exceeded %u ms",
+                     (unsigned)FMO_CHANNEL_QUERY_TIMEOUT_MS);
             s_query_pending = false;
             fmo_monitor_set_control(&s_snapshot.state, false);
             xQueueOverwrite(s_update_queue, &s_snapshot);
@@ -349,8 +351,9 @@ static bool request_current_channel(void)
     s_query_revision = s_speaker_revision;
     xSemaphoreGive(s_state_lock);
     int sent = esp_websocket_client_send_text(s_control_socket.client, request,
-                                               sizeof(request) - 1, pdMS_TO_TICKS(250));
+                                               sizeof(request) - 1, pdMS_TO_TICKS(FMO_LINK_IO_TIMEOUT_MS));
     if (sent != sizeof(request) - 1) {
+        ESP_LOGW(TAG, "Control reconnect: channel query send failed (%d)", sent);
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
         s_query_pending = false;
         fmo_monitor_invalidate_channel(&s_snapshot.state);
@@ -384,7 +387,10 @@ static bool request_radio_profile(void)
             "{\"type\":\"config\",\"subType\":\"%s\",\"data\":{}}", methods[i]);
         if (length <= 0 || (size_t)length >= sizeof(request) ||
             esp_websocket_client_send_text(s_control_socket.client, request, length,
-                pdMS_TO_TICKS(250)) != length) return true;
+                pdMS_TO_TICKS(FMO_LINK_IO_TIMEOUT_MS)) != length) {
+            ESP_LOGW(TAG, "Control reconnect: radio profile send failed at field %u", i);
+            return true;
+        }
     }
     return false;
 }
@@ -425,13 +431,16 @@ static void websocket_event(void *handler_args, esp_event_base_t event_base,
         if (remaining < *minimum) *minimum = remaining;
         xSemaphoreGive(s_state_lock);
     }
+    const char *kind = socket->kind == FMO_SOCKET_EVENTS ? "Events" : "Control";
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "%s socket connected", kind);
         post_link(link_type, true);
         fmo_network_request_refresh();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED:
+        ESP_LOGW(TAG, "%s socket disconnected (event=%ld)", kind, (long)event_id);
         reset_rx(socket);
         post_link(link_type, false);
         break;
@@ -439,6 +448,8 @@ static void websocket_event(void *handler_args, esp_event_base_t event_base,
         receive_fragment(socket, data);
         break;
     case WEBSOCKET_EVENT_ERROR:
+        ESP_LOGW(TAG, "%s socket error (type=%d)", kind,
+                 data ? (int)data->error_handle.error_type : -1);
         reset_rx(socket);
         post_link(link_type, false);
         break;
@@ -455,9 +466,9 @@ static esp_err_t start_socket(fmo_socket_t *socket, const char *uri)
         .task_stack = 4096,
         .enable_close_reconnect = true,
         .reconnect_timeout_ms = 2000,
-        .network_timeout_ms = 3000,
-        .ping_interval_sec = 5,
-        .pingpong_timeout_sec = 10,
+        .network_timeout_ms = FMO_LINK_IO_TIMEOUT_MS,
+        .ping_interval_sec = FMO_LINK_PING_INTERVAL_SEC,
+        .pingpong_timeout_sec = FMO_LINK_PONG_TIMEOUT_SEC,
     };
     socket->client = esp_websocket_client_init(&config);
     if (!socket->client) return ESP_ERR_NO_MEM;

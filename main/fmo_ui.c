@@ -15,18 +15,16 @@
 #define MUTED 0x929292
 #define LINE 0x303030
 #define RED 0xFF5252
-/* Vertical bands share consistent visible gaps. A real detail row trades
- * 24 px of profile height; speech and last-heard use the roomier profile. */
+/* Fixed bands: unknown metadata and first idle use the same geometry as
+ * live speech. Status/error text shares the air row instead of moving panels. */
 #define LINK_TOP 32
 #define LINK_HEIGHT 24
 #define CHANNEL_TOP 62
 #define CHANNEL_HEIGHT 32
 #define RADIO_TOP 102
 #define RADIO_ROW_HEIGHT 26
-#define RADIO_DETAIL_ROW_HEIGHT 20
 #define AIR_TOP 218
 #define CALLSIGN_TOP 245
-#define DETAIL_TOP 257
 #define ACTIVITY_TOP 289
 #define FOOTER_TOP 296
 LV_FONT_DECLARE(fmo_channel_font);
@@ -36,7 +34,7 @@ LV_FONT_DECLARE(fmo_callsign_bold_32);
 static lv_obj_t *link_label, *battery_label, *channel_label, *clock_label;
 static lv_obj_t *battery_body;
 static int last_battery = -2;
-static lv_obj_t *air_label, *callsign_label, *detail_label, *hint_label;
+static lv_obj_t *air_label, *callsign_label, *hint_label;
 static lv_obj_t *radio_panel, *radio_labels[4];
 static fmo_audio_meter_t audio_meter;
 static bool audio_meter_enabled;
@@ -303,24 +301,22 @@ static void create_monitor(void)
     channel_label = label(channel, 8, 0, 200, &fmo_channel_font, BLACK, "--");
     lv_obj_set_style_text_align(channel_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(channel_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    radio_panel = rect(screen, 12, RADIO_TOP, 216, 8 + 4 * RADIO_DETAIL_ROW_HEIGHT, BLACK);
+    radio_panel = rect(screen, 12, RADIO_TOP, 216, 8 + 4 * RADIO_ROW_HEIGHT, BLACK);
     lv_obj_set_style_border_color(radio_panel, lv_color_hex(ORANGE), 0);
     lv_obj_set_style_border_width(radio_panel, 1, 0);
     lv_obj_set_style_radius(radio_panel, 8, 0);
     const char *values[] = {"--", "-- MHz", "--", "高度: -- m"};
     for (unsigned i = 0; i < 4; ++i) {
-        radio_labels[i] = label(radio_panel, 10, 4 + RADIO_DETAIL_ROW_HEIGHT * i, 196,
+        radio_labels[i] = label(radio_panel, 10, 4 + RADIO_ROW_HEIGHT * i, 196,
             i == 1 ? &lv_font_montserrat_20 : &fmo_channel_font, WHITE, values[i]);
         lv_obj_set_height(radio_labels[i], lv_obj_get_style_text_font(radio_labels[i], 0)->line_height);
-        center_ink(radio_labels[i], 4 + RADIO_DETAIL_ROW_HEIGHT * i, RADIO_DETAIL_ROW_HEIGHT, 'H');
+        center_ink(radio_labels[i], 4 + RADIO_ROW_HEIGHT * i, RADIO_ROW_HEIGHT, 'H');
     }
-    air_label = label(screen, 12, AIR_TOP - 24, 216, &fmo_channel_font, MUTED, "守听中");
-    center_ink(air_label, AIR_TOP - 24, 24, 'H');
-    callsign_label = label(screen, 12, CALLSIGN_TOP - 24, 216, &fmo_callsign_bold_32, WHITE, "--");
+    air_label = label(screen, 12, AIR_TOP, 216, &fmo_channel_font, MUTED, "等待电台发言");
+    center_ink(air_label, AIR_TOP, 24, 'H');
+    callsign_label = label(screen, 12, CALLSIGN_TOP, 216, &fmo_callsign_bold_32, WHITE, "--");
     lv_label_set_long_mode(callsign_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    center_ink(callsign_label, CALLSIGN_TOP - 24, 36, 'H');
-    detail_label = label(screen, 12, DETAIL_TOP, 216, &fmo_channel_font, MUTED, "等待电台发言");
-    center_ink(detail_label, DETAIL_TOP, 32, 'H');
+    center_ink(callsign_label, CALLSIGN_TOP, 36, 'H');
     audio_bar_width = 0;
     lv_obj_add_event_cb(screen, draw_audio_bar, LV_EVENT_DRAW_MAIN_END, NULL);
     fmo_audio_meter_reset(&audio_meter);
@@ -372,12 +368,10 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         if (*p >= 0x80) { non_ascii = true; break; }
     center_ink(channel_label, 0, CHANNEL_HEIGHT, non_ascii ? 0x4E2D : 'H');
     const char *call = "--";
-    const char *air = live ? "守听中" : "等待频道同步";
-    const char *detail = "";
+    const char *air = live ? "等待电台发言" : "等待频道同步";
     if (setup) {
         air = "热点密码";
         call = setup_password;
-        detail = "打开 192.168.9.1";
     } else if (speaking) {
         air = "正在发言";
         call = s->speaker;
@@ -385,11 +379,10 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         air = "上次通联";
         call = s->last_speaker;
     } else if (error[0]) {
-        air = "等待重试";
-        detail = !strcmp(error, "DATA RESET FAILED") ?
+        air = !strcmp(error, "DATA RESET FAILED") ?
                  "数据清理失败 请重试" : !strcmp(error, "SETUP SAVE FAILED") ?
                  "配网设置保存失败" : "网络启动失败 请重试";
-    } else if (live) detail = "等待电台发言";
+    }
     text(air_label, air);
     color(air_label, speaking || setup ? ORANGE : MUTED);
     text(callsign_label, call);
@@ -403,18 +396,7 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     const lv_font_t *font = size.x > 216 ? small : large;
     if (lv_obj_get_style_text_font(callsign_label, 0) != font)
         lv_obj_set_style_text_font(callsign_label, font, 0);
-    /* Reclaim the removed grid row for readable profile spacing. Keep the
-     * compact panel when a real error/setup/idle detail needs that row. */
-    bool has_detail = detail[0] != 0;
-    int row_height = has_detail ? RADIO_DETAIL_ROW_HEIGHT : RADIO_ROW_HEIGHT;
-    int speaker_offset = has_detail ? -24 : 0;
-    lv_obj_set_height(radio_panel, 8 + 4 * row_height);
-    center_ink(callsign_label, CALLSIGN_TOP + speaker_offset, 36, 'H');
-    /* All detail strings are literals; avoid heap churn on idle transitions. */
-    if (strcmp(lv_label_get_text(detail_label), detail))
-        lv_label_set_text_static(detail_label, detail);
-    if (has_detail) lv_obj_remove_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
+    center_ink(callsign_label, CALLSIGN_TOP, 36, 'H');
     bool radio_online = !setup && !error[0] && s->wifi_connected && s->control_connected;
     const fmo_radio_profile_t *r = &s->radio;
     text(radio_labels[0], radio_online && r->device_name[0] ? r->device_name : "--");
@@ -430,14 +412,13 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     text(radio_labels[3], buffer);
     for (unsigned i = 0; i < 4; ++i) {
         color(radio_labels[i], radio_online ? WHITE : MUTED);
-        center_ink(radio_labels[i], 4 + row_height * i, row_height, 'H');
+        center_ink(radio_labels[i], 4 + RADIO_ROW_HEIGHT * i, RADIO_ROW_HEIGHT, 'H');
     }
-    if (setup) snprintf(buffer, sizeof(buffer), "手机连接上方热点");
+    if (setup) snprintf(buffer, sizeof(buffer), "打开 192.168.9.1");
     else snprintf(buffer, sizeof(buffer), "音频:%s%u%%  长按OK:配网", controls->audio_enabled ? "开" : "关",
                   controls->volume);
     text(hint_label, buffer);
     center_ink(link_label, LINK_TOP, LINK_HEIGHT, 'H');
-    center_ink(air_label, AIR_TOP + speaker_offset, 24, 'H');
-    center_ink(detail_label, DETAIL_TOP, 32, 'H');
+    center_ink(air_label, AIR_TOP, 24, 'H');
     center_ink(hint_label, FOOTER_TOP, 24, 'H');
 }

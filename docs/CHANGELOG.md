@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Reduce premature reconnects during brief LAN delays: allow 10 seconds for a single channel query, 15 seconds for confirmed-channel freshness and 30 seconds for WebSocket pongs. Match control send waits to the 3-second transport timeout, retain delayed-reply ownership and log reconnect reasons. Keep radio panel, speech status and callsign rows fixed when data first arrives. Add delayed-response, hard-timeout and empty/populated-layout regressions. On-device reconnect recovery remains unverified.
+
 - Replace the fixed speech underline with a yellow PCM RMS audio-level bar, using
   bounded integer calculation, quiet-input gating, an 80 ms full-scale rise
   and 500 ms fall. Update only the two bar rows at 20 Hz, using the existing

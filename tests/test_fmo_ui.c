@@ -221,24 +221,34 @@ int main(int argc, char **argv)
     lv_text_get_size(&number_size, "100", lv_obj_get_style_text_font(percent, 0),
                      0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     assert(number_size.x <= 30); /* All three digits fit the compact battery. */
-    /* Reclaim the empty detail row, but restore it for genuine idle/errors.
-     * Switching between them must keep the profile/status/callsign separate. */
+    /* Empty profile, initial idle and populated speech share fixed rows. */
     lv_obj_update_layout(lv_screen_active());
     lv_refr_now(display);
     verify_callsign_center(245);
-    int compact_call_y = lv_obj_get_y(find_text(lv_screen_active(), "BG5ESN"));
+    lv_obj_t *callsign = find_text(lv_screen_active(), "BG5ESN");
+    int call_y = lv_obj_get_y(callsign);
+    int status_y = lv_obj_get_y(find_text(lv_screen_active(), "上次通联"));
+    lv_obj_t *profile = lv_obj_get_parent(find_text(lv_screen_active(), "QUANSHENG"));
+    int profile_y = lv_obj_get_y(profile), profile_h = lv_obj_get_height(profile);
+    fmo_radio_profile_t saved_radio = state.radio;
+    memset(&state.radio, 0, sizeof(state.radio));
     state.last_speaker[0] = 0;
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     lv_obj_update_layout(lv_screen_active());
     lv_refr_now(display);
-    verify_callsign_center(221);
-    lv_obj_t *idle_detail = find_text(lv_screen_active(), "等待电台发言");
-    assert(idle_detail && !lv_obj_has_flag(idle_detail, LV_OBJ_FLAG_HIDDEN));
+    verify_callsign_center(245);
+    lv_obj_t *idle_status = find_text(lv_screen_active(), "等待电台发言");
+    assert(idle_status && lv_obj_get_y(idle_status) == status_y);
+    assert(lv_obj_get_y(profile) == profile_y && lv_obj_get_height(profile) == profile_h);
+    assert(!strcmp(lv_label_get_text(callsign), "--"));
+    state.radio = saved_radio;
     strcpy(state.last_speaker, "BG5ESN");
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     lv_obj_update_layout(lv_screen_active());
-    assert(lv_obj_has_flag(idle_detail, LV_OBJ_FLAG_HIDDEN));
-    assert(lv_obj_get_y(find_text(lv_screen_active(), "BG5ESN")) == compact_call_y);
+    assert(find_text(lv_screen_active(), "上次通联"));
+    assert(!find_text(lv_screen_active(), "等待电台发言"));
+    assert(lv_obj_get_y(find_text(lv_screen_active(), "BG5ESN")) == call_y);
+    assert(lv_obj_get_y(profile) == profile_y && lv_obj_get_height(profile) == profile_h);
     state.events_connected = false;
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     assert(!find_text(lv_screen_active(), "BG5ESN"));
@@ -284,7 +294,8 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "rare")) fmo_monitor_set_channel(&state, 42, "龍龠龯");
     if (argc > 1 && !strcmp(argv[1], "long")) strcpy(state.last_speaker, "BG5ESN/12345678");
     if (argc > 1 && !strcmp(argv[1], "muted")) controls.audio_enabled=false;
-    if (argc > 1 && !strcmp(argv[1], "idle")) state.last_speaker[0]=0;
+    if (argc > 1 && (!strcmp(argv[1], "idle") || !strcmp(argv[1], "empty"))) state.last_speaker[0]=0;
+    if (argc > 1 && !strcmp(argv[1], "empty")) memset(&state.radio, 0, sizeof(state.radio));
     if (argc > 1 && !strcmp(argv[1], "error")) error="NETWORK START FAILED";
     fmo_ui_render(&state, error, ssid, password, 82, 12000, false, &controls);
     uint8_t preview_level = 0;
@@ -306,7 +317,7 @@ int main(int argc, char **argv)
     if (controls.view == FMO_VIEW_MONITOR) {
         verify_channel_center();
         verify_connection_gap();
-        verify_callsign_center(error[0] || !state.last_speaker[0] ? 221 : 245);
+        verify_callsign_center(245);
     }
     if (controls.view == FMO_VIEW_MONITOR && !ssid[0]) {
         const char *footer = controls.audio_enabled ? "音频:开50%  长按OK:配网" : "音频:关50%  长按OK:配网";

@@ -37,6 +37,7 @@ def run():
     preamble = r'''
 #include "fmo_monitor_state.h"
 #include "fmo_text.h"
+#include "fmo_link_policy.h"
 #include "cJSON.h"
 #include <assert.h>
 #include <stdio.h>
@@ -74,7 +75,7 @@ static int sends, short_send;
 static char last_request[128];
 static int esp_websocket_client_is_connected(int client) { return client; }
 static int esp_websocket_client_send_text(int client, const char *data, size_t length, int wait) {
-    (void)client; (void)wait; ++sends;
+    (void)client; assert(wait == FMO_LINK_IO_TIMEOUT_MS); ++sends;
     snprintf(last_request,sizeof(last_request),"%s",data);
     return short_send ? 0 : (int)length;
 }
@@ -247,17 +248,30 @@ int main(void) {
     query(); parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL42);
     clock_ms=10000; assert(!request_current_channel());
     parse_fmo_message(FMO_SOCKET_EVENTS, START);
-    clock_ms=11999; assert(!request_current_channel()); assert(sends==1);
+    clock_ms=12999; assert(!request_current_channel()); assert(sends==1);
     assert(published.state.channel_valid && published.state.speaking);
-    clock_ms=12000; assert(request_current_channel()); assert(sends==1);
+    clock_ms=13000; assert(!request_current_channel()); assert(sends==1);
+    assert(s_query_pending && s_snapshot.state.control_connected && published.state.channel_valid);
+    // A delayed response past the old 2 s deadline must retain this session.
+    parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL42); // Predates START: request fresh metadata.
+    assert(!s_query_pending && s_snapshot.state.channel_valid);
+    assert(!request_current_channel()); assert(sends==2);
+    clock_ms=22999; assert(!request_current_channel()); assert(sends==2);
+    assert(s_snapshot.state.control_connected && s_snapshot.state.channel_valid);
+    clock_ms=23000; assert(request_current_channel()); assert(sends==2);
     assert(!s_query_pending && !s_snapshot.state.control_connected);
     parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL43); // Delayed Q1, before client is drained.
     assert(s_snapshot.state.speaking && s_snapshot.state.channel_uid==42);
     assert(!s_snapshot.state.channel_valid);
     post_update(&link); // Coordinator has drained/replaced the old client.
-    assert(!request_current_channel()); assert(sends==2);
+    assert(!request_current_channel()); assert(sends==3);
     parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL42);
     assert(s_snapshot.state.channel_valid && s_snapshot.state.speaking);
+    assert(!request_current_channel()); assert(s_query_pending);
+    clock_ms+=3000;
+    parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL42);
+    assert(!s_query_pending && s_snapshot.state.control_connected && s_snapshot.state.channel_valid);
+    assert(s_snapshot.state.channel_confirmed_ms == clock_ms);
     short_send=1;assert(request_current_channel());assert(!s_query_pending);
     parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL43);
     assert(s_snapshot.state.speaking && s_snapshot.state.channel_uid==42);

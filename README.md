@@ -235,7 +235,7 @@ private keys, or unsanitized logs.
 
 ## Reliability and resource use
 
-- Channel queries that time out after two seconds or are partially sent recreate the control client before another query. The protocol has no request IDs, so old replies cannot inherit a new query's speaker revision.
+- Channel queries that time out after ten seconds or are partially sent recreate the control client before another query. The protocol has no request IDs, so old replies cannot inherit a new query's speaker revision.
 - Split the font losslessly into two fallback fonts with compact glyph descriptors; preserve all existing characters and rendered pixels.
 
 - State is reduced under a mutex and sent as a one-slot snapshot. The UI always
@@ -250,6 +250,8 @@ private keys, or unsanitized logs.
 - Invalid JSON, invalid callsigns/start metadata, and raw or JSON-escaped NUL clear live
   speech and require a fresh channel query. Replies predating a new speaker do
   not erase that speaker, invalidate a confirmed channel, or restore an unknown channel.
+- All three WebSocket connections ping every ten seconds and allow thirty seconds for a pong. Control writes allow the same three-second wait as transport reads; query waits retain the confirmed channel without replacing an outstanding request. Logs identify socket failures and coordinator reconnect reasons.
+- Profile rows, speech status and callsign positions stay fixed from initial empty data through active speech and last-heard display.
 - Both abnormal disconnects and clean CLOSE handshakes reconnect. Failed client
   creation is retried while Wi-Fi is available.
 - Channel queries run every second and after a new talker. With a confirmed
@@ -257,7 +259,7 @@ private keys, or unsanitized logs.
   background. An unknown channel still shows synchronization. A reply from
   before the latest talker is discarded and retried without blanking an existing
   confirmed channel or extending its confirmation age.
-  Changing channel clears prior callsigns. Confirmation expires after five seconds.
+  Changing channel clears prior callsigns. Confirmation expires after fifteen seconds.
 - The local event protocol does not carry a channel UID. Across the two sockets,
   channel attribution is best effort: a switch clears ambiguous speech and waits
   for a later event; polling cannot provide an atomic channel/speaker snapshot.
