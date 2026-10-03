@@ -33,7 +33,7 @@ def run():
     header = (ROOT / "main/fmo_network.h").read_text()
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
-        "update_clock_service", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "cleanup_wifi", "prepare_network", "post_link"))
+        "update_clock_service", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "expire_channel", "cleanup_wifi", "prepare_network", "post_link"))
     preamble = r'''
 #include "fmo_monitor_state.h"
 #include "fmo_text.h"
@@ -205,6 +205,30 @@ int main(void) {
     parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL43);
     assert(published.state.channel_valid && published.state.channel_uid==42);
     assert(!strcmp(published.state.last_speaker,"TEST/2"));
+    // Repeated talker changes cannot starve confirmations of the SAME channel.
+    for(unsigned i=0;i<40;++i) {
+        parse_fmo_message(FMO_SOCKET_EVENTS,releases[0]);
+        query();clock_ms+=1000;
+        parse_fmo_message(FMO_SOCKET_EVENTS,START);
+        parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+        xSemaphoreTake(s_state_lock,portMAX_DELAY);expire_channel();xSemaphoreGive(s_state_lock);
+        assert(published.state.channel_valid && published.state.channel_confirmed_ms==clock_ms);
+        assert(published.state.speaking && !strcmp(published.state.speaker,"BG5ESN"));
+    }
+    // Actual confirmation loss still expires and publishes a synchronization state.
+    clock_ms+=FMO_CHANNEL_MAX_AGE_MS;
+    xSemaphoreTake(s_state_lock,portMAX_DELAY);expire_channel();xSemaphoreGive(s_state_lock);
+    assert(published.state.channel_valid);
+    ++clock_ms;
+    xSemaphoreTake(s_state_lock,portMAX_DELAY);expire_channel();xSemaphoreGive(s_state_lock);
+    assert(!published.state.channel_valid);
+    // Cached UID equality must not restore an expired/unknown channel via an old reply.
+    query();parse_fmo_message(FMO_SOCKET_EVENTS,releases[0]);
+    parse_fmo_message(FMO_SOCKET_EVENTS,START);
+    parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    assert(!published.state.channel_valid);
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    assert(published.state.channel_valid);
     // Without a confirmed channel, a short PTT cannot bless a stale response.
     link.type=FMO_UPDATE_EVENTS_LINK; link.connected=false; post_update(&link);
     link.connected=true; post_update(&link);

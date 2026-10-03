@@ -439,7 +439,7 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         air = "热点密码";
         call = setup_password;
     } else if (speaking) {
-        air = "正在发言";
+        air = "正在通联";
         call = s->speaker;
     } else if (live && s->last_speaker[0]) {
         air = "上次通联";

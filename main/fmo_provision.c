@@ -156,7 +156,7 @@ static uint16_t s_record_count;
 static const char page[] =
 "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>FMO Wi-Fi 配网</title><style>body{background:#101010;color:#eee;font:16px system-ui;max-width:440px;margin:32px auto;padding:20px}"
-"h1{color:#ff8a00}input,select,button{box-sizing:border-box;width:100%;padding:14px;margin:8px 0 18px;font:inherit}button{background:#ff8a00;border:0}small{color:#bbb}</style>"
+"h1{color:#ff8a00}input,select,button{box-sizing:border-box;width:100%;padding:14px;margin:8px 0 18px;font:inherit}button{-webkit-appearance:none;appearance:none;background:#ff8a00;color:#101010;border:0}button:disabled{opacity:.55}small{color:#bbb}</style>"
 "<h1>FMO · Wi-Fi 配网</h1><p>连接成功后自动寻找 fmo.local</p>"
 "<form id='form'><label for='net'>附近的 2.4 GHz Wi-Fi</label><select id='net'><option value=''>手动输入 / 隐藏网络</option></select>"
 "<label for='ssid'>Wi-Fi 名称</label><input id='ssid' required autocomplete='off'>"

@@ -27,7 +27,8 @@ void lock_pcm(void);
 void unlock_pcm(void);
 #define taskENTER_CRITICAL(x) ((void)(x),lock_pcm())
 #define taskEXIT_CRITICAL(x) ((void)(x),unlock_pcm())
-#define ESP_LOGI(tag,...) ((void)(tag))
+static inline void discard_log(const char *format, ...) {(void)format;}
+#define ESP_LOGI(tag,...) ((void)(tag),discard_log(__VA_ARGS__))
 #define ESP_LOGW(tag,...) ((void)(tag))
 const char *esp_err_to_name(esp_err_t err);
 int64_t esp_timer_get_time(void);
@@ -37,6 +38,9 @@ unsigned ulTaskNotifyTake(int clear, unsigned timeout);
 void vTaskDelay(unsigned ticks);
 typedef struct {char host[64]; unsigned short port;} fmo_endpoint_t;
 void fmo_provision_get_endpoint(fmo_endpoint_t *endpoint);
+typedef enum {WIFI_PS_NONE, WIFI_PS_MIN_MODEM, WIFI_PS_MAX_MODEM} wifi_ps_type_t;
+esp_err_t esp_wifi_get_ps(wifi_ps_type_t *ps);
+esp_err_t esp_wifi_set_ps(wifi_ps_type_t ps);
 esp_err_t bsp_audio_init(void);
 esp_err_t bsp_audio_set_format(uint32_t rate,uint8_t bits,uint8_t channels);
 void bsp_audio_set_volume(uint8_t percent);
@@ -45,7 +49,7 @@ typedef struct {int generation;} client_t;
 typedef client_t *esp_websocket_client_handle_t;
 typedef struct {
     const char *uri; int buffer_size, task_stack;
-    bool enable_close_reconnect;
+    bool enable_close_reconnect, disable_pingpong_discon;
     int reconnect_timeout_ms, network_timeout_ms, ping_interval_sec, pingpong_timeout_sec;
 } esp_websocket_client_config_t;
 typedef struct {int payload_len,payload_offset,data_len,op_code; bool fin; char *data_ptr;} esp_websocket_event_data_t;
@@ -74,6 +78,9 @@ static int mode, locked, codec_inits, formats, create_calls, starts, stops, dest
 static int applied, writes, waits, notifications, task_creates, prime_writes;
 static int init_fail, register_fail, start_fail, codec_fail, task_fail;
 static uint64_t clock_ms;
+static wifi_ps_type_t wifi_ps;
+static unsigned wifi_awake_calls, wifi_restore_calls;
+static unsigned drained_samples;
 static callback_t callback;
 static client_t fake_client;
 static uint8_t incoming[5120];
@@ -88,6 +95,15 @@ int xTaskCreate(void (*task)(void *),const char *name,unsigned stack,void *arg,u
 void xTaskNotifyGive(TaskHandle_t task) {assert(task);++notifications;}
 void vTaskDelay(unsigned ticks) {
     assert(!locked);clock_ms+=ticks;
+    if(mode==8)fmo_audio_set_volume(0);
+    if(mode==6 && clock_ms%20==0) {
+        int16_t out[160];
+        lock_pcm();
+        size_t n=fmo_pcm_read(&s_pcm,out,160,clock_ms);
+        unlock_pcm();
+        for(size_t i=0;i<n;++i)assert(out[i]==0x1234);
+        drained_samples+=(unsigned)n;
+    }
     if(mode==5 && applied>0) {
         if(writes==1) {
             uint8_t level=fmo_audio_get_level();assert(level>0);
@@ -102,9 +118,17 @@ esp_err_t bsp_audio_init(void) {assert(!locked);++codec_inits;return codec_fail 
 esp_err_t bsp_audio_set_format(uint32_t rate,uint8_t bits,uint8_t channels) {
     assert(!locked && rate==8000 && bits==16 && channels==1);++formats;return ESP_OK;
 }
+esp_err_t esp_wifi_get_ps(wifi_ps_type_t *ps) {assert(!locked);*ps=wifi_ps;return ESP_OK;}
+esp_err_t esp_wifi_set_ps(wifi_ps_type_t ps) {
+    assert(!locked);wifi_ps=ps;
+    if(ps==WIFI_PS_NONE)++wifi_awake_calls;else ++wifi_restore_calls;
+    return ESP_OK;
+}
 void bsp_audio_set_volume(uint8_t volume) {assert(!locked);applied=volume;}
 esp_websocket_client_handle_t esp_websocket_client_init(const esp_websocket_client_config_t *c) {
     assert(!locked && !strcmp(c->uri,"ws://fmo.test:8080/audio") && c->buffer_size==1024 && c->task_stack==4096);
+    assert(c->network_timeout_ms==10000 && c->ping_interval_sec==10 && c->disable_pingpong_discon);
+    if(mode>0)assert(wifi_ps==WIFI_PS_NONE);
     ++create_calls;if(init_fail){--init_fail;return NULL;}fake_client.generation++;return &fake_client;
 }
 esp_err_t esp_websocket_register_events(esp_websocket_client_handle_t c,int id,callback_t cb,void *arg) {
@@ -153,6 +177,13 @@ esp_err_t bsp_audio_write(const void *pcm,size_t bytes) {
         if(!starts)for(size_t i=0;i<160;++i)assert(samples[i]==0);
         clock_ms+=1000;
         if(writes==12){assert(create_calls==3 && starts==1);longjmp(done,1);}
+    } else if(mode==7) {
+        if(writes==1){assert(starts==1);clock_ms+=FMO_AUDIO_ACTIVITY_TIMEOUT_MS;}
+        else if(starts==2) {
+            for(size_t i=0;i<160;++i)assert(samples[i]==0x5678);
+            assert(stops==1 && destroys==1 && prime_writes==32);
+            longjmp(done,1);
+        } else for(size_t i=0;i<160;++i)assert(samples[i]==0);
     } else if(mode==4) return ESP_FAIL;
     else if(mode==5 && writes==2) {
         /* A reconnect while codec I/O blocks must not publish the old chunk. */
@@ -164,6 +195,7 @@ esp_err_t bsp_audio_write(const void *pcm,size_t bytes) {
 unsigned ulTaskNotifyTake(int clear,unsigned timeout) {
     assert(!locked && clear==pdTRUE && timeout>0);++waits;clock_ms+=timeout;
     if(mode==1) {
+        assert(wifi_ps==WIFI_PS_MAX_MODEM);
         assert(applied==0 && !s_pcm.count);
         assert(fmo_audio_get_level()==0);
         if(waits==1){assert(stops==1 && destroys==1);fmo_audio_set_volume(70);fmo_audio_set_online(false);}
@@ -182,6 +214,7 @@ static void reset_test(int scenario) {
     mode=scenario;locked=codec_inits=formats=create_calls=starts=stops=destroys=0;
     applied=writes=waits=notifications=prime_writes=0;clock_ms=1000;
     init_fail=register_fail=start_fail=codec_fail=0;callback=NULL;
+    wifi_ps=WIFI_PS_MAX_MODEM;wifi_awake_calls=wifi_restore_calls=0;
     reset_stream(false);atomic_store(&s_online,true);atomic_store(&s_volume,50);
 }
 int main(void) {
@@ -201,7 +234,43 @@ int main(void) {
         if(scenario==3)codec_fail=1;
         if(!setjmp(done))audio_task(NULL);
         assert(!locked);
+        if(scenario==1)assert(wifi_awake_calls==2 && wifi_restore_calls==2);
+        if(scenario==3)assert(!wifi_awake_calls);
+        if(scenario==4)assert(wifi_awake_calls==1 && wifi_restore_calls==1);
     }
+    // Bursting socket reads yield to the codec instead of discarding words.
+    reset_test(6);callback=audio_event;starts=1;reset_stream(true);
+    uint32_t burst_drops=s_dropped_samples, burst_bytes=s_received_bytes;
+    for(unsigned i=0;i<64;++i)send_frame();
+    assert(s_received_bytes-burst_bytes==64*5120);
+    assert(s_dropped_samples==burst_drops && drained_samples>0 && s_buffer_wait_ms>0);
+    assert(s_pcm.count+drained_samples==64*2560 && !s_pcm.pending_count);
+    // Reserve a whole maximum-size message without pending-buffer deadlock.
+    static uint8_t maximum[FMO_PCM_MESSAGE_BYTES];
+    for(unsigned i=0;i<sizeof(maximum);i+=2){maximum[i]=0x34;maximum[i+1]=0x12;}
+    esp_websocket_event_data_t maximum_frame={.payload_len=sizeof(maximum),.data_len=sizeof(maximum),
+        .op_code=2,.fin=true,.data_ptr=(char *)maximum};
+    audio_event(NULL,NULL,WEBSOCKET_EVENT_DATA,&maximum_frame);
+    assert(s_dropped_samples==burst_drops && !s_pcm.pending_count);
+    assert(s_pcm.count+drained_samples==64*2560+FMO_PCM_RATE);
+    // PCM alone keeps a busy stream alive even when PONG is delayed/lost.
+    for(unsigned i=0;i<120;++i){clock_ms+=1000;send_frame();assert(!stream_stalled());}
+    reset_test(0);callback=audio_event;reset_stream(true);
+    clock_ms+=FMO_AUDIO_ACTIVITY_TIMEOUT_MS-1;assert(!stream_stalled());
+    ++clock_ms;assert(stream_stalled());
+    esp_websocket_event_data_t pong={.op_code=10,.fin=true};
+    audio_event(NULL,NULL,WEBSOCKET_EVENT_DATA,&pong);assert(!stream_stalled());
+    clock_ms+=FMO_AUDIO_ACTIVITY_TIMEOUT_MS;assert(stream_stalled());
+    reset_stream(false);assert(!stream_stalled());
+    // The worker tears down a silent, unresponsive stream and re-primes fresh audio.
+    reset_test(7);
+    if(!setjmp(done))audio_task(NULL);
+    assert(!locked);
+    // Mute interrupts a full-buffer wait before accepting stale audio.
+    reset_test(0);callback=audio_event;starts=1;reset_stream(true);
+    for(unsigned i=0;i<4;++i)send_frame();
+    uint32_t mute_bytes=s_received_bytes;mode=8;
+    send_frame();assert(s_received_bytes==mute_bytes && !locked && s_pcm.count==4*2560);
     reset_test(0);
     s_level=75;s_level_ms=clock_ms;s_accepting=true;
     assert(fmo_audio_get_level()==75);
@@ -215,13 +284,20 @@ int main(void) {
     esp_websocket_event_data_t bad={.payload_len=-1};
     s_level=75;
     audio_event(NULL,NULL,WEBSOCKET_EVENT_DATA,&bad);assert(!s_pcm.count && !fmo_audio_get_level());
+    reset_stream(true);
+    callback=audio_event;
+    uint32_t bytes_before=s_received_bytes, drops_before=s_dropped_samples;
+    for(unsigned i=0;i<5;++i)send_frame();
+    assert(s_received_bytes-bytes_before==5*5120);
+    assert(s_dropped_samples-drops_before==5*2560-FMO_PCM_CAPACITY);
+    assert(s_invalid_messages>0);
     puts("FMO audio runtime: PASS (worker ownership, mute/offline flush, retry, format, meter freshness/reset, failure isolation)");
 }
 '''
 with tempfile.TemporaryDirectory(prefix="fmo-audio-test-") as tmp:
     directory = Path(tmp)
     (directory / "audio_env.h").write_text(header)
-    for name in ("esp_err.h", "esp_log.h", "esp_timer.h", "esp_websocket_client.h", "bsp_audio.h", "fmo_provision.h", "freertos/FreeRTOS.h", "freertos/task.h"):
+    for name in ("esp_err.h", "esp_log.h", "esp_timer.h", "esp_wifi.h", "esp_websocket_client.h", "bsp_audio.h", "fmo_provision.h", "freertos/FreeRTOS.h", "freertos/task.h"):
         path = directory / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('#include "audio_env.h"\n')

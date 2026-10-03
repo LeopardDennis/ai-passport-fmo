@@ -22,6 +22,12 @@ static void feed_frame(uint64_t now)
 }
 int main(void)
 {
+    assert(fmo_pcm_message_reserve(2,true,5120,0)==2560);
+    assert(fmo_pcm_message_reserve(2,false,1436,0)==FMO_PCM_MESSAGE_BYTES/2);
+    assert(fmo_pcm_message_reserve(0,true,1436,0)==0);
+    assert(fmo_pcm_message_reserve(2,true,5120,1024)==0);
+    assert(fmo_pcm_message_reserve(9,true,0,0)==0);
+    assert(fmo_pcm_message_reserve(2,true,FMO_PCM_MESSAGE_BYTES+1,0)==0);
     pattern(); fmo_pcm_reset(&pcm);
     feed_frame(1000); /* Real FMO frame shape: 5120 bytes in five receive events. */
     assert(pcm.count==2560 && !pcm.active);
@@ -53,12 +59,78 @@ int main(void)
     assert(fmo_pcm_feed(&pcm,1,true,4,0,"text",4,3000)==FMO_PCM_IGNORED);
     assert(fmo_pcm_feed(&pcm,2,true,2,0,signed_samples,2,3000)==FMO_PCM_COMPLETE);
     assert(fmo_pcm_read(&pcm,output,160,3060)==1 && output[0]==INT16_MIN);
-    /* Slow playback is bounded and drops oldest samples, never half samples. */
-    fmo_pcm_reset(&pcm); feed_frame(4000); feed_frame(4010);
-    assert(pcm.count==FMO_PCM_CAPACITY);
-    assert(fmo_pcm_read(&pcm,output,160,4010)==160);
-    assert(output[0]==-256); /* Dropped 1024 oldest samples. */
+    /* Consecutive 320 ms frames must survive LAN bursts without losing words. */
     fmo_pcm_reset(&pcm);
-    assert(fmo_pcm_read(&pcm,output,160,4020)==0 && output[0]==0);
-    puts("FMO PCM: PASS (live frame size, chunk splits, signed PCM, buffering, overflow, reset)");
+    for (unsigned i=0;i<3;++i) feed_frame(4000+i);
+    assert(pcm.count==3*2560 && !pcm.dropped_samples);
+    for (size_t block=0;block<48;++block) {
+        assert(fmo_pcm_read(&pcm,output,160,4010+block*20)==160);
+        for(size_t i=0;i<160;++i)
+            assert(output[i]==(int16_t)((int)((block*160+i)%2560)-1280));
+    }
+    /* Even a large partial message stays silent until its final fragment. */
+    fmo_pcm_reset(&pcm);
+    assert(fmo_pcm_feed(&pcm,2,true,5120,0,frame,1024,5000)==FMO_PCM_MORE);
+    assert(fmo_pcm_read(&pcm,output,160,5000)==0);
+    assert(fmo_pcm_read(&pcm,output,160,5030)==0);
+    assert(fmo_pcm_feed(&pcm,2,true,5120,1024,frame+1024,1024,5030)==FMO_PCM_MORE);
+    assert(pcm.count==0 && pcm.pending_count==1024);
+    for(uint64_t t=5030;t<8530;t+=20)
+        assert(fmo_pcm_read(&pcm,output,160,t)==0);
+    /* A delayed remainder keeps the frame aligned and preserves queued speech. */
+    for(size_t offset=2048;offset<sizeof(frame);offset+=1024)
+        assert(fmo_pcm_feed(&pcm,2,true,sizeof(frame),offset,frame+offset,1024,8530)
+               ==(offset+1024==sizeof(frame) ? FMO_PCM_COMPLETE : FMO_PCM_MORE));
+    assert(pcm.count==2560 && !pcm.pending_count && !pcm.active && !pcm.dropped_samples);
+    assert(fmo_pcm_read(&pcm,output,160,8530)==160 && output[0]==-1280);
+    for(size_t block=1;block<16;++block) {
+        assert(fmo_pcm_read(&pcm,output,160,8530+block*20)==160);
+        for(size_t i=0;i<160;++i)assert(output[i]==(int16_t)((int)(block*160+i)-1280));
+    }
+    /* A committed message may drain while the next message is still arriving. */
+    fmo_pcm_reset(&pcm);feed_frame(9000);
+    assert(fmo_pcm_feed(&pcm,2,true,5120,0,frame,1024,9001)==FMO_PCM_MORE);
+    assert(pcm.count==2560 && pcm.pending_count==512);
+    for(size_t block=0;block<16;++block) {
+        assert(fmo_pcm_read(&pcm,output,160,9001+block*20)==160);
+        for(size_t i=0;i<160;++i)assert(output[i]==(int16_t)((int)(block*160+i)-1280));
+    }
+    assert(fmo_pcm_read(&pcm,output,160,9400)==0 && pcm.pending_count==512);
+    for(size_t off=1024;off<sizeof(frame);off+=1024)
+        fmo_pcm_feed(&pcm,2,true,5120,off,frame+off,1024,9500);
+    assert(pcm.count==2560 && !pcm.pending_count);
+    assert(fmo_pcm_read(&pcm,output,160,9500)==160 && output[0]==-1280);
+    /* Long speech is many bounded messages, not a one-second speech limit. */
+    fmo_pcm_reset(&pcm);
+    for(unsigned message=0;message<100;++message) {
+        uint64_t t=10000+message*320;
+        feed_frame(t);
+        for(size_t block=0;block<16;++block) {
+            assert(fmo_pcm_read(&pcm,output,160,t+block*20)==160);
+            for(size_t i=0;i<160;++i)assert(output[i]==(int16_t)((int)(block*160+i)-1280));
+        }
+        assert(!pcm.count && !pcm.pending_count && !pcm.dropped_samples);
+    }
+    /* Every accepted one-second message fits even before playback begins. */
+    static uint8_t full_second[FMO_PCM_MESSAGE_BYTES];
+    for (size_t i=0;i<sizeof(full_second);i+=2) {
+        full_second[i]=0x34;full_second[i+1]=0x12;
+    }
+    fmo_pcm_reset(&pcm);
+    assert(fmo_pcm_feed(&pcm,2,true,sizeof(full_second),0,full_second,
+                        sizeof(full_second),5000)==FMO_PCM_COMPLETE);
+    assert(pcm.count==FMO_PCM_RATE);
+    for(unsigned i=0;i<50;++i) {
+        assert(fmo_pcm_read(&pcm,output,160,5000+i*20)==160);
+        for(unsigned j=0;j<160;++j)assert(output[j]==0x1234);
+    }
+    /* Slow playback remains bounded and drops complete oldest samples. */
+    fmo_pcm_reset(&pcm);
+    for(unsigned i=0;i<6;++i)feed_frame(6000+i);
+    assert(pcm.count==FMO_PCM_CAPACITY && pcm.dropped_samples==3072);
+    assert(fmo_pcm_read(&pcm,output,160,6010)==160);
+    assert(output[0]==-768); /* Dropped 3072 oldest samples across frame boundaries. */
+    fmo_pcm_reset(&pcm);
+    assert(fmo_pcm_read(&pcm,output,160,6020)==0 && output[0]==0);
+    puts("FMO PCM: PASS (live frame size, chunk splits, signed PCM, burst continuity, full-second message, buffering, overflow, reset)");
 }

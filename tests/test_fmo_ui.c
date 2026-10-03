@@ -172,7 +172,7 @@ int main(int argc, char **argv)
         {.callsign="BG1ABC",.timestamp=1767272100}}};
     fmo_monitor_set_channel(&state, 42, "安吉FMO中继");
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
-    assert(find_text(lv_screen_active(), "正在发言"));
+    assert(find_text(lv_screen_active(), "正在通联"));
     assert(find_text(lv_screen_active(), "音频: 50%  长按OK: 配网"));
     /* Measure real rendered pixels: speech metadata alone must not light the
      * bar. PCM animates width and silence erases the old, longer rectangle. */

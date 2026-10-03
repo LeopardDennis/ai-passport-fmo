@@ -6,6 +6,7 @@
 #include "bsp_audio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -22,6 +23,9 @@ static fmo_pcm_t s_pcm;
 static bool s_accepting; /* Protected with the PCM buffer. */
 static uint8_t s_level;
 static uint64_t s_level_ms;
+static uint32_t s_received_bytes, s_dropped_samples, s_invalid_messages;
+static uint64_t s_activity_ms;
+static uint32_t s_buffer_wait_ms;
 static uint32_t s_stream_generation; /* All meter fields share s_pcm_lock. */
 
 static uint64_t now_ms(void)
@@ -41,11 +45,51 @@ static void reset_stream(bool accepting)
 {
     taskENTER_CRITICAL(&s_pcm_lock);
     s_accepting = accepting;
+    s_activity_ms = now_ms();
     fmo_pcm_reset(&s_pcm);
     s_level = 0;
     s_level_ms = 0;
     ++s_stream_generation;
     taskEXIT_CRITICAL(&s_pcm_lock);
+}
+
+/* Backpressure runs in the socket task, outside the PCM critical section.
+ * Reserve the entire message, so a partial message cannot fill the ring and
+ * prevent the playback worker from freeing space. A wedged codec still falls
+ * back to bounded overflow after two seconds; mute/offline interrupts promptly. */
+static bool wait_for_pcm_space(const esp_websocket_event_data_t *data)
+{
+    if (data->payload_len < 0 || data->payload_offset < 0) return true;
+    size_t reserve = fmo_pcm_message_reserve(data->op_code, data->fin,
+                        (size_t)data->payload_len, (size_t)data->payload_offset);
+    if (!reserve) return true;
+    uint64_t start = now_ms();
+    taskENTER_CRITICAL(&s_pcm_lock);
+    uint32_t generation = s_stream_generation;
+    taskEXIT_CRITICAL(&s_pcm_lock);
+    for (;;) {
+        taskENTER_CRITICAL(&s_pcm_lock);
+        bool accepting = s_accepting && generation == s_stream_generation &&
+                         atomic_load(&s_online) && atomic_load(&s_volume);
+        bool ready = s_pcm.active ||
+                     s_pcm.count + s_pcm.pending_count + reserve <= FMO_PCM_CAPACITY;
+        uint64_t elapsed = now_ms() - start;
+        if (!accepting || ready || elapsed >= FMO_AUDIO_BUFFER_WAIT_MS) {
+            s_buffer_wait_ms += (uint32_t)elapsed;
+            taskEXIT_CRITICAL(&s_pcm_lock);
+            return accepting;
+        }
+        taskEXIT_CRITICAL(&s_pcm_lock);
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
+static bool stream_stalled(void)
+{
+    taskENTER_CRITICAL(&s_pcm_lock);
+    bool stalled = s_accepting && now_ms() - s_activity_ms >= FMO_AUDIO_ACTIVITY_TIMEOUT_MS;
+    taskEXIT_CRITICAL(&s_pcm_lock);
+    return stalled;
 }
 
 static void audio_event(void *arg, esp_event_base_t base, int32_t id, void *event)
@@ -57,20 +101,30 @@ static void audio_event(void *arg, esp_event_base_t base, int32_t id, void *even
     } else if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_CLOSED ||
                id == WEBSOCKET_EVENT_ERROR) {
         reset_stream(false);
+        ESP_LOGW(TAG, "Audio stream disconnected (event=%ld)", (long)id);
     } else if (id == WEBSOCKET_EVENT_DATA) {
         esp_websocket_event_data_t *data = event;
-        if (!data) return;
+        if (!data || !wait_for_pcm_space(data)) return;
         taskENTER_CRITICAL(&s_pcm_lock);
         if (s_accepting && atomic_load(&s_online) && atomic_load(&s_volume)) {
+            uint32_t dropped_before = s_pcm.dropped_samples;
             fmo_pcm_result_t result = FMO_PCM_INVALID;
             if (data->payload_len < 0 || data->payload_offset < 0 || data->data_len < 0)
                 fmo_pcm_reset(&s_pcm);
             else result = fmo_pcm_feed(&s_pcm, data->op_code, data->fin,
                               (size_t)data->payload_len, (size_t)data->payload_offset,
                               data->data_ptr, (size_t)data->data_len, now_ms());
+            if ((result == FMO_PCM_MORE || result == FMO_PCM_COMPLETE) && data->data_len > 0)
+                s_activity_ms = now_ms();
+            else if (result == FMO_PCM_IGNORED && (data->op_code == 9 || data->op_code == 10))
+                s_activity_ms = now_ms();
             if (result == FMO_PCM_INVALID) {
+                ++s_invalid_messages;
                 s_level = 0;
                 ++s_stream_generation;
+            } else if (result == FMO_PCM_MORE || result == FMO_PCM_COMPLETE) {
+                s_received_bytes += (uint32_t)data->data_len;
+                s_dropped_samples += s_pcm.dropped_samples - dropped_before;
             }
         }
         taskEXIT_CRITICAL(&s_pcm_lock);
@@ -87,9 +141,11 @@ static esp_err_t start_stream(esp_websocket_client_handle_t *client)
     esp_websocket_client_config_t config = {
         .uri = uri, .buffer_size = 1024, .task_stack = 4096,
         .enable_close_reconnect = true, .reconnect_timeout_ms = 2000,
-        .network_timeout_ms = FMO_LINK_IO_TIMEOUT_MS,
+        .network_timeout_ms = FMO_AUDIO_IO_TIMEOUT_MS,
         .ping_interval_sec = FMO_LINK_PING_INTERVAL_SEC,
-        .pingpong_timeout_sec = FMO_LINK_PONG_TIMEOUT_SEC,
+        /* A valid PCM stream is also proof of liveness. The library's PONG-only
+         * deadline disconnected a receiving stream on the measured device. */
+        .disable_pingpong_discon = true,
     };
     *client = esp_websocket_client_init(&config);
     if (!*client) return ESP_ERR_NO_MEM;
@@ -120,11 +176,36 @@ static void audio_task(void *argument)
     esp_websocket_client_handle_t client = NULL;
     bool codec_attempted = false, codec_ready = false;
     int applied_volume = -1;
-    uint64_t retry_ms = 0;
+    uint64_t retry_ms = 0, diagnostics_ms = 0, wifi_retry_ms = 0;
+    wifi_ps_type_t saved_ps = WIFI_PS_MIN_MODEM;
+    bool wifi_awake = false;
+    uint32_t written_samples = 0, played_samples = 0, write_max_ms = 0;
     int16_t output[FMO_PCM_CHUNK_SAMPLES];
     for (;;) {
+        if (now_ms() - diagnostics_ms >= 30000) {
+            diagnostics_ms = now_ms();
+            taskENTER_CRITICAL(&s_pcm_lock);
+            uint32_t received = s_received_bytes, dropped = s_dropped_samples;
+            uint32_t invalid = s_invalid_messages;
+            unsigned queued = (unsigned)s_pcm.count, pending = (unsigned)s_pcm.pending_count;
+            uint32_t buffer_wait = s_buffer_wait_ms;
+            s_buffer_wait_ms = 0;
+            s_received_bytes = s_dropped_samples = s_invalid_messages = 0;
+            taskEXIT_CRITICAL(&s_pcm_lock);
+            /* Aggregate sizes only: never log PCM, callsigns or endpoints. */
+            ESP_LOGI(TAG, "Audio stats: rx=%lu bytes dropped=%lu samples invalid=%lu queued=%u pending=%u out=%lu pcm=%lu write_max_ms=%lu buffer_wait_ms=%lu",
+                     (unsigned long)received, (unsigned long)dropped,
+                     (unsigned long)invalid, queued, pending, (unsigned long)written_samples,
+                     (unsigned long)played_samples, (unsigned long)write_max_ms, (unsigned long)buffer_wait);
+            written_samples = played_samples = write_max_ms = 0;
+        }
         unsigned volume = atomic_load(&s_volume);
         bool play = atomic_load(&s_online) && volume;
+        if (wifi_awake && (!play || !codec_ready)) {
+            esp_err_t err = esp_wifi_set_ps(saved_ps);
+            wifi_awake = false;
+            if (err != ESP_OK) ESP_LOGW(TAG, "Wi-Fi power restore failed: %s", esp_err_to_name(err));
+        }
         if (!play || !codec_ready) {
             if (codec_ready && applied_volume != 0) {
                 bsp_audio_set_volume(0);
@@ -150,6 +231,15 @@ static void audio_task(void *argument)
                 continue;
             }
         }
+        if (!wifi_awake && now_ms() >= wifi_retry_ms) {
+            esp_err_t err = esp_wifi_get_ps(&saved_ps);
+            if (err == ESP_OK) err = esp_wifi_set_ps(WIFI_PS_NONE);
+            wifi_awake = err == ESP_OK;
+            if (!wifi_awake) {
+                wifi_retry_ms = now_ms() + 5000;
+                ESP_LOGW(TAG, "Wi-Fi audio power policy failed: %s", esp_err_to_name(err));
+            }
+        }
         if (applied_volume <= 0) {
             bsp_audio_set_volume(0);
             applied_volume = 0;
@@ -173,6 +263,15 @@ static void audio_task(void *argument)
             if (!atomic_load(&s_online) || !atomic_load(&s_volume)) continue;
             volume = atomic_load(&s_volume);
         }
+        if (client && stream_stalled()) {
+            ESP_LOGW(TAG, "Audio reconnect: no PCM or heartbeat activity for %u ms",
+                     (unsigned)FMO_AUDIO_ACTIVITY_TIMEOUT_MS);
+            bsp_audio_set_volume(0);
+            applied_volume = 0;
+            stop_stream(&client);
+            retry_ms = now_ms() + 2000;
+            continue;
+        }
         if (!client && now_ms() >= retry_ms) {
             esp_err_t err = start_stream(&client);
             if (err != ESP_OK) {
@@ -185,7 +284,7 @@ static void audio_task(void *argument)
             applied_volume = (int)volume;
         }
         taskENTER_CRITICAL(&s_pcm_lock);
-        fmo_pcm_read(&s_pcm, output, FMO_PCM_CHUNK_SAMPLES, now_ms());
+        size_t available = fmo_pcm_read(&s_pcm, output, FMO_PCM_CHUNK_SAMPLES, now_ms());
         uint32_t generation = s_stream_generation;
         taskEXIT_CRITICAL(&s_pcm_lock);
         uint8_t level = fmo_audio_meter_measure(output, FMO_PCM_CHUNK_SAMPLES);
@@ -196,6 +295,7 @@ static void audio_task(void *argument)
             applied_volume = 0;
             continue;
         }
+        uint64_t write_start = now_ms();
         if (bsp_audio_write(output, sizeof(output)) != ESP_OK) {
             bsp_audio_set_volume(0);
             applied_volume = 0;
@@ -203,6 +303,10 @@ static void audio_task(void *argument)
             codec_ready = false;
             ESP_LOGW(TAG, "Playback failed; audio disabled until reboot");
         } else {
+            uint32_t write_ms = (uint32_t)(now_ms() - write_start);
+            if (write_ms > write_max_ms) write_max_ms = write_ms;
+            written_samples += FMO_PCM_CHUNK_SAMPLES;
+            played_samples += (uint32_t)available;
             taskENTER_CRITICAL(&s_pcm_lock);
             if (generation == s_stream_generation && s_accepting &&
                 atomic_load(&s_online) && atomic_load(&s_volume)) {

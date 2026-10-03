@@ -97,13 +97,15 @@ static void post_update(const fmo_update_t *update)
         break;
     case FMO_UPDATE_CHANNEL:
         if (s_query_pending && state->wifi_connected && state->control_connected) {
-            if (s_query_revision == s_speaker_revision) {
+            if (s_query_revision == s_speaker_revision ||
+                (state->channel_valid && state->channel_uid == update->uid)) {
                 fmo_monitor_set_channel(state, update->uid, update->text);
                 state->channel_confirmed_ms = now_ms();
             } else {
-                // Discard replies from before the latest talker. Keep an existing
-                // confirmed channel visible while a fresh query runs; its age
-                // still expires normally, and an unknown channel stays unknown.
+                // A same-channel confirmation may renew its age across a talker
+                // change without altering speech. Different/unknown channels
+                // still need a query from after the latest talker.
+                ESP_LOGW(TAG, "Channel reply discarded: talker changed and channel differs or is unknown");
                 refresh = true;
             }
         }
@@ -168,6 +170,7 @@ static bool copy_ascii(char *destination, size_t capacity, const char *source)
 /* A lost/invalid PTT release must not leave a permanently live callsign. */
 static void invalidate_live_message(void)
 {
+    ESP_LOGW(TAG, "Live state invalidated: malformed or unsupported live metadata");
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
     s_snapshot.state.speaking = false;
     s_snapshot.state.speaker[0] = '\0';
@@ -653,6 +656,19 @@ static void prepare_network(void)
     }
 }
 
+/* Caller holds the state lock. Keep expiry observable without personal data. */
+static void expire_channel(void)
+{
+    uint64_t age = now_ms() - s_snapshot.state.channel_confirmed_ms;
+    if (s_snapshot.state.channel_valid && age > FMO_CHANNEL_MAX_AGE_MS) {
+        ESP_LOGW(TAG, "Channel confirmation expired: age=%llu ms pending=%d events=%d control=%d",
+                 (unsigned long long)age, s_query_pending,
+                 s_snapshot.state.events_connected, s_snapshot.state.control_connected);
+        fmo_monitor_invalidate_channel(&s_snapshot.state);
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+    }
+}
+
 static void network_task(void *argument)
 {
     (void)argument;
@@ -708,11 +724,7 @@ static void network_task(void *argument)
                 stop_socket(&s_control_socket);
         }
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
-        if (s_snapshot.state.channel_valid &&
-            now_ms() - s_snapshot.state.channel_confirmed_ms > FMO_CHANNEL_MAX_AGE_MS) {
-            fmo_monitor_invalidate_channel(&s_snapshot.state);
-            xQueueOverwrite(s_update_queue, &s_snapshot);
-        }
+        expire_channel();
         unsigned events_min = s_events_stack_min;
         unsigned control_min = s_control_stack_min;
         xSemaphoreGive(s_state_lock);

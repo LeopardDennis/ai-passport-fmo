@@ -55,7 +55,7 @@ state or channel-query ownership. Losing Wi-Fi/event connectivity clears history
 control-query delays do not clear it. The protocol does not supply per-record
 frequency, mode, remarks or grid; saved QSO details and local `config/getUserPhy*`
 settings are not queried for these rows. Status, bold callsign and the yellow
-PCM level bar remain above the panel. Status reads speaking during a transmission
+PCM level bar remain above the panel. Status reads in contact during a transmission
 and last contact after release. The speaker grid is shown beside the callsign
 in a separate small gray label, retained after release until the next speaker;
 long callsigns scroll within
@@ -71,10 +71,26 @@ minute. Time synchronization requires access to the NTP server. Separate transmi
 Conversation audio plays automatically after the FMO event/control connections
 are ready, at 50% volume by default. The `/audio` interface supplies 8 kHz,
 16-bit signed little-endian mono PCM; the existing ES8311/I2S driver plays it
-in a separate worker. A fixed 8 KiB queue handles split WebSocket frames,
-short buffering, underrun silence and bounded latency by dropping oldest samples
-on overflow. Muting or losing connectivity clears queued audio and closes only
+in a separate worker. A fixed 24 KiB queue holds up to 1.536 seconds of PCM and handles split
+WebSocket messages, an initial 100 ms buffer target and underrun silence. Before
+accepting a new message, the socket worker reserves space for the whole message
+and yields to playback for up to two seconds when full. This applies TCP
+backpressure instead of immediately discarding burst audio, without increasing
+RAM. Only a stalled consumer beyond that wait falls back to dropping oldest samples. TCP chunks and continuation frames are decoded in that same ring
+but become playable only when the complete WebSocket message arrives; an
+unfinished message cannot play its first words before its delayed remainder.
+While audio is enabled, the worker disables Wi-Fi modem sleep to reduce receive
+jitter, and restores the previous power mode on mute, offline or codec failure.
+Keeping Wi-Fi awake increases power consumption during audio playback.
+Muting or losing connectivity clears queued audio and closes only
 the audio socket; playback resumes with fresh data and a silent DMA prime.
+The audio socket has a separate 10-second transport wait. It keeps sending
+heartbeats but reconnects for inactivity only after 90 seconds without valid
+PCM or PING/PONG activity, so a receiving stream is not cut off solely for a
+missing PONG. TCP errors and peer resets still reconnect. Audio
+logs report connection changes and aggregate received bytes, discarded samples
+and invalid messages, committed/pending samples, output/source samples and
+maximum codec-write duration and buffer-wait time every 30 seconds, without conversation content.
 Audio continues while the LCD sleeps. No microphone capture, recording or
 transmit/PTT commands are added. The footer uses one centered row with the audio percentage and the long-OK setup hint. It displays the selected volume while audio is enabled and 0% while muted; clicking OK toggles sound and holding OK opens the setup/network menu.
 With no active speech, the middle shows the last-heard callsign in bold white;
@@ -257,15 +273,22 @@ private keys, or unsanitized logs.
 - Invalid JSON, invalid callsigns/start metadata, and raw or JSON-escaped NUL clear live
   speech and require a fresh channel query. Replies predating a new speaker do
   not erase that speaker, invalidate a confirmed channel, or restore an unknown channel.
-- All three WebSocket connections ping every ten seconds and allow thirty seconds for a pong. Control writes allow the same three-second wait as transport reads; query waits retain the confirmed channel without replacing an outstanding request. Logs identify socket failures and coordinator reconnect reasons.
+- All three WebSocket connections ping every ten seconds. Events/control allow
+  thirty seconds for PONG; audio uses a ninety-second valid-activity deadline.
+  Control writes and events/control reads allow three seconds; audio reads allow
+  ten seconds. Query waits retain the confirmed channel without replacing an
+  outstanding request. Logs identify socket failures, invalid live metadata,
+  channel expiry and coordinator reconnect reasons.
 - Profile rows, speech status and callsign positions stay fixed from initial empty data through active speech and last-heard display.
 - Both abnormal disconnects and clean CLOSE handshakes reconnect. Failed client
   creation is retried while Wi-Fi is available.
 - Channel queries run every second and after a new talker. With a confirmed
   channel, speech starts immediately on screen while the query runs in the
   background. An unknown channel still shows synchronization. A reply from
-  before the latest talker is discarded and retried without blanking an existing
-  confirmed channel or extending its confirmation age.
+  before the latest talker may renew an already-valid channel with the same UID
+  without changing speech. Replies for a different or unknown channel are
+  discarded and retried, and cannot restore an expired channel. This prevents
+  frequent talker changes from starving same-channel confirmations.
   Changing channel clears prior callsigns. Confirmation expires after fifteen seconds.
 - The local event protocol does not carry a channel UID. Across the two sockets,
   channel attribution is best effort: a switch clears ambiguous speech and waits
