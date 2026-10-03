@@ -28,8 +28,12 @@ it does not act as a virtual FMO radio or connect directly to an FMO MQTT server
 The portrait UI uses black, orange and white based on the supplied FMO reference
 images (not an official color specification). The large callsign belongs to the
 active speaker: bold orange while speaking, bold white for the last-heard callsign while
-idle. Grid coordinates, elapsed-time counters and station/host prefixes are hidden. An orange line indicates speech activity, not audio amplitude. Unknown
-metadata is not simulated. Callsigns use Montserrat Bold, setup passwords use
+idle. Grid coordinates, elapsed-time counters and station/host prefixes are hidden.
+The thin yellow bar shows the RMS strength of conversation PCM sent to playback,
+with a quick rise and smooth fall. It uses the source audio level independently
+of speaker volume and clears when muted, disconnected, or viewing setup/menus.
+Quiet input is gated; missing audio leaves it empty. It is not an RF measurement.
+Unknown metadata is not simulated. Callsigns use Montserrat Bold, setup passwords use
 the regular built-in weight, and Noto Sans CJK covers Chinese channel names, not a claim to match the original FMO typeface.
 Status and controls are in Chinese; callsigns, network names and addresses stay
 unchanged. The iOS-inspired battery capsule contains a numeric percentage, turns
@@ -83,7 +87,9 @@ ctest --test-dir /tmp/fmo-ui-preview --output-on-failure
 /tmp/fmo-ui-preview/fmo_ui_preview onair /tmp/fmo-onair.ppm
 ```
 
-Other preview states are `lastheard`, `offline`, `setup` (QR), `setup_info` (credentials), `network`, `long`, and `error`.
+Other preview states are `idle`, `muted`, `lastheard`, `offline`, `setup` (QR),
+`setup_info` (credentials), `network`, `long`, `rare`, `error`, and
+`meter_low` / `meter_mid` / `meter_high` (audio strength).
 
 Up to five verified Wi-Fi networks are saved. The previous single-network format
 is imported automatically. Updating an existing SSID replaces its password only

@@ -1,5 +1,6 @@
 #include "fmo_ui.h"
 #include "fmo_clock.h"
+#include "fmo_audio_meter.h"
 #include "fmo_wifi_qr.h"
 #include "src/misc/lv_text_private.h"
 #include <inttypes.h>
@@ -9,6 +10,7 @@
 /* Approximation of the supplied FMO reference, not an official color spec. */
 #define BLACK 0x000000
 #define ORANGE 0xFF8A00
+#define AUDIO_LEVEL_COLOR 0xFFD000
 #define WHITE 0xF4F4F4
 #define MUTED 0x929292
 #define LINE 0x303030
@@ -34,8 +36,11 @@ LV_FONT_DECLARE(fmo_callsign_bold_32);
 static lv_obj_t *link_label, *battery_label, *channel_label, *clock_label;
 static lv_obj_t *battery_body;
 static int last_battery = -2;
-static lv_obj_t *air_label, *callsign_label, *detail_label, *hint_label, *activity;
+static lv_obj_t *air_label, *callsign_label, *detail_label, *hint_label;
 static lv_obj_t *radio_panel, *radio_labels[4];
+static fmo_audio_meter_t audio_meter;
+static bool audio_meter_enabled;
+static int audio_bar_width;
 
 static void text(lv_obj_t *label, const char *value)
 {
@@ -130,8 +135,13 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
     if (monitor_content) {
         lv_obj_delete(monitor_content);
         monitor_content = NULL;
+        audio_bar_width = 0;
     }
     if (!overlay) {
+        /* Reserve the final QR canvas before small page objects. Otherwise the
+         * default canvas resize can split redraw headroom after live updates. */
+        lv_draw_buf_t *qr_buffer = view == FMO_VIEW_SETUP && !controls->setup_info ?
+            lv_draw_buf_create(128, 128, LV_COLOR_FORMAT_I1, LV_STRIDE_AUTO) : NULL;
         overlay = rect(lv_screen_active(), 0, 40, 240, 280, BLACK);
         if (view == FMO_VIEW_NETWORK) {
             label(overlay, 12, 10, 216, &fmo_channel_font, ORANGE, "网络设置");
@@ -150,9 +160,12 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
                 char payload[160];
                 lv_obj_t *qr = NULL;
                 if (fmo_wifi_qr_payload(payload, sizeof(payload), ssid, password)) {
-                    qr = lv_qrcode_create(overlay);
+                    if (qr_buffer) qr = lv_qrcode_create(overlay);
                     if (qr) {
-                        lv_qrcode_set_size(qr, 128);
+                        lv_draw_buf_t *default_buffer = lv_canvas_get_draw_buf(qr);
+                        lv_canvas_set_draw_buf(qr, qr_buffer);
+                        qr_buffer = NULL; /* The QR widget now owns the canvas. */
+                        if (default_buffer) lv_draw_buf_destroy(default_buffer);
                         lv_qrcode_set_dark_color(qr, lv_color_hex(BLACK));
                         lv_qrcode_set_light_color(qr, lv_color_hex(0xFFFFFF));
                         lv_qrcode_set_quiet_zone(qr, true);
@@ -166,6 +179,7 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
                         }
                     }
                 }
+                if (qr_buffer) lv_draw_buf_destroy(qr_buffer);
                 if (!qr) {
                     lv_obj_delete(overlay);
                     overlay = NULL;
@@ -240,6 +254,44 @@ void fmo_ui_set_clock(int64_t unix_seconds)
     center_ink(clock_label, 0, 32, 'H');
 }
 
+static void audio_bar_area(lv_obj_t *obj, lv_area_t *area, int width)
+{
+    lv_obj_get_coords(obj, area);
+    area->x1 += 12;
+    area->x2 = area->x1 + width - 1;
+    area->y1 += ACTIVITY_TOP;
+    area->y2 = area->y1 + 1;
+}
+
+static void draw_audio_bar(lv_event_t *event)
+{
+    if (!audio_bar_width) return;
+    lv_area_t area;
+    audio_bar_area(lv_event_get_target(event), &area, audio_bar_width);
+    lv_draw_rect_dsc_t rect;
+    lv_draw_rect_dsc_init(&rect);
+    rect.bg_color = lv_color_hex(AUDIO_LEVEL_COLOR);
+    rect.bg_opa = LV_OPA_COVER;
+    lv_draw_rect(lv_event_get_layer(event), &rect, &area);
+}
+
+void fmo_ui_set_audio_level(uint8_t level, uint64_t now_ms)
+{
+    uint8_t visible = 0;
+    if (!monitor_content || !audio_meter_enabled) {
+        fmo_audio_meter_reset(&audio_meter);
+    } else visible = fmo_audio_meter_step(&audio_meter, level, now_ms);
+    int width = (216 * visible + 50) / 100;
+    if (monitor_content && width != audio_bar_width) {
+        lv_area_t area;
+        audio_bar_area(monitor_content, &area, width > audio_bar_width ? width : audio_bar_width);
+        /* Redraw just these two pixel rows. Draw directly on the existing
+         * panel: no resizing/layout work or separate LVGL widget allocation. */
+        lv_obj_invalidate_area(monitor_content, &area);
+    }
+    audio_bar_width = width;
+}
+
 static void create_monitor(void)
 {
     lv_obj_t *screen = rect(lv_screen_active(), 0, 0, 240, 320, BLACK);
@@ -269,8 +321,10 @@ static void create_monitor(void)
     center_ink(callsign_label, CALLSIGN_TOP - 24, 36, 'H');
     detail_label = label(screen, 12, DETAIL_TOP, 216, &fmo_channel_font, MUTED, "等待电台发言");
     center_ink(detail_label, DETAIL_TOP, 32, 'H');
-    activity = rect(screen, 12, ACTIVITY_TOP, 216, 2, ORANGE);
-    lv_obj_add_flag(activity, LV_OBJ_FLAG_HIDDEN);
+    audio_bar_width = 0;
+    lv_obj_add_event_cb(screen, draw_audio_bar, LV_EVENT_DRAW_MAIN_END, NULL);
+    fmo_audio_meter_reset(&audio_meter);
+    audio_meter_enabled = false;
     hint_label = label(screen, 12, FOOTER_TOP, 216, &fmo_channel_font, MUTED, "音频:开50%  长按OK:配网");
     center_ink(hint_label, FOOTER_TOP, 24, 'H');
 }
@@ -279,7 +333,6 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
                    const char *setup_ssid, const char *setup_password,
                    int battery, uint64_t now_ms, bool sync_hint, const fmo_controls_t *controls)
 {
-    (void)now_ms;
     char buffer[80];
     bool setup = setup_ssid[0] != 0;
     bool live = !setup && !error[0] && s->wifi_connected && s->events_connected &&
@@ -303,6 +356,9 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         last_battery = soc;
     }
     overlay_render(controls, s->wifi_connected, setup_ssid, setup_password);
+    audio_meter_enabled = controls->view == FMO_VIEW_MONITOR && live &&
+                          controls->audio_enabled && controls->volume > 0;
+    if (!audio_meter_enabled) fmo_ui_set_audio_level(0, now_ms);
     if (controls->view != FMO_VIEW_MONITOR) return;
     text(link_label, link);
     color(link_label, error[0] ? RED : live ? WHITE : ORANGE);
@@ -359,8 +415,6 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         lv_label_set_text_static(detail_label, detail);
     if (has_detail) lv_obj_remove_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
-    if (speaking) lv_obj_remove_flag(activity, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(activity, LV_OBJ_FLAG_HIDDEN);
     bool radio_online = !setup && !error[0] && s->wifi_connected && s->control_connected;
     const fmo_radio_profile_t *r = &s->radio;
     text(radio_labels[0], radio_online && r->device_name[0] ? r->device_name : "--");

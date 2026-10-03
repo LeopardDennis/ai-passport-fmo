@@ -87,6 +87,19 @@ static void verify_clock_center(void)
     assert(abs(first + last - 239) <= 2); /* Visible ink at screen center. */
 }
 
+static int audio_bar_width(lv_display_t *display)
+{
+    lv_refr_now(display);
+    int width = 0;
+    for (int x = 0; x < 240; ++x) {
+        if (pixels[289 * 240 + x]) {
+            assert(x >= 12 && x < 228);
+            ++width;
+        }
+    }
+    return width;
+}
+
 int main(int argc, char **argv)
 {
     lv_init();
@@ -122,9 +135,30 @@ int main(int argc, char **argv)
     fmo_monitor_set_channel(&state, 42, "安吉FMO中继");
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     assert(find_text(lv_screen_active(), "音频:开50%  长按OK:配网"));
+    /* Measure real rendered pixels: speech metadata alone must not light the
+     * bar. PCM animates width and silence erases the old, longer rectangle. */
+    assert(audio_bar_width(display) == 0);
+    fmo_ui_set_audio_level(100, 12000);
+    fmo_ui_set_audio_level(100, 12050);
+    int attack_width = audio_bar_width(display);
+    assert(attack_width > 0 && attack_width < 216);
+    fmo_ui_set_audio_level(100, 12100);
+    assert(audio_bar_width(display) == 216);
+    fmo_ui_set_audio_level(0, 12200);
+    assert(audio_bar_width(display) == 173);
+    fmo_ui_set_audio_level(0, 12600);
+    assert(audio_bar_width(display) == 0);
+    fmo_ui_set_audio_level(50, 12680);
+    assert(audio_bar_width(display) == 108);
     controls.audio_enabled=false;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
     assert(find_text(lv_screen_active(), "音频:关50%  长按OK:配网"));
+    fmo_ui_set_audio_level(100, 12780);
+    assert(audio_bar_width(display) == 0);
+    controls.audio_enabled=true; controls.volume=0;
+    fmo_ui_render(&state,"","","",82,12800,false,&controls);
+    fmo_ui_set_audio_level(100, 12880);
+    assert(audio_bar_width(display) == 0);
     controls.volume=100; controls.audio_enabled=true;
     fmo_ui_render(&state,"","","",82,12000,true,&controls);
     assert(find_text(lv_screen_active(), "音频:开100%  长按OK:配网"));
@@ -164,6 +198,14 @@ int main(int argc, char **argv)
     assert(!find_text(lv_screen_active(), "等待频道同步"));
     assert(!find_text(lv_screen_active(), "PM01"));
     assert(!find_text(lv_screen_active(), "PM01 / 0 秒前"));
+    /* Audio may finish after the PTT-end event. Preserve its smooth tail. */
+    fmo_ui_set_audio_level(100, 20000);
+    fmo_ui_set_audio_level(100, 20080);
+    assert(audio_bar_width(display) == 216);
+    fmo_ui_set_audio_level(0, 20180);
+    assert(audio_bar_width(display) == 173);
+    fmo_ui_set_audio_level(0, 20580);
+    assert(audio_bar_width(display) == 0);
     fmo_ui_render(&state, "", "", "", -1, 60000, false, &controls);
     assert(!find_text(lv_screen_active(), "PM01"));
     assert(!find_text(lv_screen_active(), "PM01 / 48 秒前"));
@@ -200,6 +242,8 @@ int main(int argc, char **argv)
     state.events_connected = false;
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     assert(!find_text(lv_screen_active(), "BG5ESN"));
+    fmo_ui_set_audio_level(100, 61000);
+    assert(audio_bar_width(display) == 0);
     fmo_controls_observe_setup(&controls, true);
     controls.setup_info = true;
     fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
@@ -209,6 +253,7 @@ int main(int argc, char **argv)
     for (unsigned i = 0; i < 20; ++i) {
         controls.setup_info = false;
         fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
+        fmo_ui_set_audio_level(100, 62000 + i * 50); /* Deleted monitor objects. */
         lv_refr_now(display);
         assert(find_text(lv_screen_active(), "扫码连接配网热点"));
         controls.setup_info = true;
@@ -220,7 +265,8 @@ int main(int argc, char **argv)
     fmo_controls_observe_setup(&controls, false);
     const char *ssid = "", *password = "", *error = "";
     state.events_connected = true;
-    if (argc < 2 || !strcmp(argv[1], "onair") || !strcmp(argv[1], "muted"))
+    bool meter_preview = argc > 1 && !strncmp(argv[1], "meter_", 6);
+    if (argc < 2 || !strcmp(argv[1], "onair") || !strcmp(argv[1], "muted") || meter_preview)
         fmo_monitor_apply_speaker(&state, "BG5ESN", "PM01", true, false, 12000);
     if (argc > 1 && (!strcmp(argv[1], "setup") || !strcmp(argv[1], "setup_info"))) {
         ssid="FMO-Setup-TEST"; password="ABCDEF012345";
@@ -241,6 +287,12 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "idle")) state.last_speaker[0]=0;
     if (argc > 1 && !strcmp(argv[1], "error")) error="NETWORK START FAILED";
     fmo_ui_render(&state, error, ssid, password, 82, 12000, false, &controls);
+    uint8_t preview_level = 0;
+    if (meter_preview) preview_level = !strcmp(argv[1], "meter_low") ? 20 :
+                                      !strcmp(argv[1], "meter_mid") ? 55 : 95;
+    else if (state.speaking) preview_level = 65;
+    fmo_ui_set_audio_level(preview_level, 70000);
+    fmo_ui_set_audio_level(preview_level, 70100);
     if (argc > 1 && !strcmp(argv[1], "offline")) {
         assert(!find_text(lv_screen_active(),"QUANSHENG"));
         assert(find_text(lv_screen_active(),"-- MHz"));

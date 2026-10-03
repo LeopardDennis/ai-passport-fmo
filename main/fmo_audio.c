@@ -1,5 +1,6 @@
 #include "fmo_audio.h"
 #include "fmo_pcm.h"
+#include "fmo_audio_meter.h"
 #include "fmo_provision.h"
 #include "bsp_audio.h"
 #include "esp_log.h"
@@ -18,10 +19,21 @@ static TaskHandle_t s_task;
 static portMUX_TYPE s_pcm_lock = portMUX_INITIALIZER_UNLOCKED;
 static fmo_pcm_t s_pcm;
 static bool s_accepting; /* Protected with the PCM buffer. */
+static uint8_t s_level;
+static uint64_t s_level_ms;
+static uint32_t s_stream_generation; /* All meter fields share s_pcm_lock. */
 
 static uint64_t now_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000);
+}
+
+static void clear_level(void)
+{
+    taskENTER_CRITICAL(&s_pcm_lock);
+    s_level = 0;
+    ++s_stream_generation;
+    taskEXIT_CRITICAL(&s_pcm_lock);
 }
 
 static void reset_stream(bool accepting)
@@ -29,6 +41,9 @@ static void reset_stream(bool accepting)
     taskENTER_CRITICAL(&s_pcm_lock);
     s_accepting = accepting;
     fmo_pcm_reset(&s_pcm);
+    s_level = 0;
+    s_level_ms = 0;
+    ++s_stream_generation;
     taskEXIT_CRITICAL(&s_pcm_lock);
 }
 
@@ -46,11 +61,16 @@ static void audio_event(void *arg, esp_event_base_t base, int32_t id, void *even
         if (!data) return;
         taskENTER_CRITICAL(&s_pcm_lock);
         if (s_accepting && atomic_load(&s_online) && atomic_load(&s_volume)) {
+            fmo_pcm_result_t result = FMO_PCM_INVALID;
             if (data->payload_len < 0 || data->payload_offset < 0 || data->data_len < 0)
                 fmo_pcm_reset(&s_pcm);
-            else fmo_pcm_feed(&s_pcm, data->op_code, data->fin,
+            else result = fmo_pcm_feed(&s_pcm, data->op_code, data->fin,
                               (size_t)data->payload_len, (size_t)data->payload_offset,
                               data->data_ptr, (size_t)data->data_len, now_ms());
+            if (result == FMO_PCM_INVALID) {
+                s_level = 0;
+                ++s_stream_generation;
+            }
         }
         taskEXIT_CRITICAL(&s_pcm_lock);
     }
@@ -163,7 +183,9 @@ static void audio_task(void *argument)
         }
         taskENTER_CRITICAL(&s_pcm_lock);
         fmo_pcm_read(&s_pcm, output, FMO_PCM_CHUNK_SAMPLES, now_ms());
+        uint32_t generation = s_stream_generation;
         taskEXIT_CRITICAL(&s_pcm_lock);
+        uint8_t level = fmo_audio_meter_measure(output, FMO_PCM_CHUNK_SAMPLES);
         /* Check again after receiving PCM so a UI mute/disconnect cannot leave
          * an old chunk queued after the requested transition. */
         if (!atomic_load(&s_online) || !atomic_load(&s_volume)) {
@@ -177,6 +199,14 @@ static void audio_task(void *argument)
             stop_stream(&client);
             codec_ready = false;
             ESP_LOGW(TAG, "Playback failed; audio disabled until reboot");
+        } else {
+            taskENTER_CRITICAL(&s_pcm_lock);
+            if (generation == s_stream_generation && s_accepting &&
+                atomic_load(&s_online) && atomic_load(&s_volume)) {
+                s_level = level;
+                s_level_ms = now_ms();
+            }
+            taskEXIT_CRITICAL(&s_pcm_lock);
         }
         /* I2S normally paces the loop; yield while its DMA initially fills. */
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -195,11 +225,27 @@ esp_err_t fmo_audio_start(void)
 
 void fmo_audio_set_online(bool online)
 {
-    if (atomic_exchange(&s_online, online) != online && s_task) xTaskNotifyGive(s_task);
+    if (atomic_exchange(&s_online, online) != online) {
+        if (!online) clear_level();
+        if (s_task) xTaskNotifyGive(s_task);
+    }
 }
 
 void fmo_audio_set_volume(uint8_t percent)
 {
     if (percent > 100) percent = 100;
-    if (atomic_exchange(&s_volume, percent) != percent && s_task) xTaskNotifyGive(s_task);
+    if (atomic_exchange(&s_volume, percent) != percent) {
+        if (!percent) clear_level();
+        if (s_task) xTaskNotifyGive(s_task);
+    }
+}
+
+uint8_t fmo_audio_get_level(void)
+{
+    uint64_t now = now_ms();
+    taskENTER_CRITICAL(&s_pcm_lock);
+    uint8_t level = s_accepting && atomic_load(&s_online) && atomic_load(&s_volume) &&
+                    now >= s_level_ms && now - s_level_ms <= 120 ? s_level : 0;
+    taskEXIT_CRITICAL(&s_pcm_lock);
+    return level;
 }

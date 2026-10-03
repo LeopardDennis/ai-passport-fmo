@@ -14,6 +14,7 @@ idf_component_register(
          "fmo_clock.c"
          "fmo_audio.c"
          "fmo_pcm.c"
+         "fmo_audio_meter.c"
          "../assets/fonts/fmo_callsign_bold_20.c"
          "../assets/fonts/fmo_callsign_bold_32.c"
          "fmo_controls.c"

@@ -192,6 +192,13 @@ static void ui_tick(lv_timer_t *timer)
     }
 }
 
+static void audio_meter_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!atomic_load(&s_display_dark))
+        fmo_ui_set_audio_level(fmo_audio_get_level(), monotonic_ms());
+}
+
 static void build_ui(void)
 {
     fmo_display_policy_touch(&s_display_policy, monotonic_ms());
@@ -202,6 +209,7 @@ static void build_ui(void)
              (unsigned)memory.max_used, (unsigned)memory.free_size,
              (unsigned)memory.free_biggest_size);
     lv_timer_create(ui_tick, 200, NULL);
+    lv_timer_create(audio_meter_tick, 50, NULL);
 }
 
 static void button_event(bsp_btn_t button, bsp_btn_ev_t event, void *user)

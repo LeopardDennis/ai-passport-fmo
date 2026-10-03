@@ -6,6 +6,16 @@
 
 ## Unreleased
 
+- Replace the fixed speech underline with a yellow PCM RMS audio-level bar, using
+  bounded integer calculation, quiet-input gating, an 80 ms full-scale rise
+  and 500 ms fall. Update only the two bar rows at 20 Hz, using the existing
+  panel without a separate widget. Reserve the QR canvas before small page
+  objects to preserve contiguous redraw memory after animation. Clear
+  stale/muted/offline levels and protect against a reconnect during codec I/O.
+  Verify measurement, timing, playback lifecycle, native rendering/memory and
+  an installable setup firmware image, including BLE size/partition protection.
+  Physical playback and animation remain unverified.
+
 - Balance monitor spacing with a larger visible gap below the connection status, consistent channel/profile separation, and tighter speaker/footer alignment. Keep audio state, volume and the long-OK setup hint together; show refresh requests in the connection row. Verify active speech, last-heard, initial idle, errors and native memory/layout without rebuilding firmware.
 
 - Receive live conversation PCM from the FMO `/audio` WebSocket through the ES8311 speaker, with automatic 50% playback, bounded buffering, disconnect/mute cleanup, silent DMA priming and isolated failures. UP/DOWN adjusts volume, short OK toggles audio, long UP refreshes and long OK retains the network menu; show audio state/volume in the footer. Verify the live endpoint, PCM framing, worker lifecycle, controls and native UI; firmware and physical playback are not tested in this code-only update.

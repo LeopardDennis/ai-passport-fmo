@@ -86,7 +86,17 @@ int xTaskCreate(void (*task)(void *),const char *name,unsigned stack,void *arg,u
     ++task_creates;if(task_fail)return 0;*handle=&fake_client;return pdPASS;
 }
 void xTaskNotifyGive(TaskHandle_t task) {assert(task);++notifications;}
-void vTaskDelay(unsigned ticks) {assert(!locked);clock_ms+=ticks;}
+void vTaskDelay(unsigned ticks) {
+    assert(!locked);clock_ms+=ticks;
+    if(mode==5 && applied>0) {
+        if(writes==1) {
+            uint8_t level=fmo_audio_get_level();assert(level>0);
+            fmo_audio_set_volume(10);assert(fmo_audio_get_level()==level);
+            clock_ms+=121;assert(fmo_audio_get_level()==0);clock_ms-=121;
+        }
+        if(writes==2) {assert(fmo_audio_get_level()==0);longjmp(done,1);}
+    }
+}
 void fmo_provision_get_endpoint(fmo_endpoint_t *e) {strcpy(e->host,"fmo.test");e->port=8080;}
 esp_err_t bsp_audio_init(void) {assert(!locked);++codec_inits;return codec_fail ? ESP_FAIL : ESP_OK;}
 esp_err_t bsp_audio_set_format(uint32_t rate,uint8_t bits,uint8_t channels) {
@@ -144,12 +154,18 @@ esp_err_t bsp_audio_write(const void *pcm,size_t bytes) {
         clock_ms+=1000;
         if(writes==12){assert(create_calls==3 && starts==1);longjmp(done,1);}
     } else if(mode==4) return ESP_FAIL;
+    else if(mode==5 && writes==2) {
+        /* A reconnect while codec I/O blocks must not publish the old chunk. */
+        callback(NULL,NULL,WEBSOCKET_EVENT_DISCONNECTED,NULL);
+        callback(NULL,NULL,WEBSOCKET_EVENT_CONNECTED,NULL);
+    }
     return ESP_OK;
 }
 unsigned ulTaskNotifyTake(int clear,unsigned timeout) {
     assert(!locked && clear==pdTRUE && timeout>0);++waits;clock_ms+=timeout;
     if(mode==1) {
         assert(applied==0 && !s_pcm.count);
+        assert(fmo_audio_get_level()==0);
         if(waits==1){assert(stops==1 && destroys==1);fmo_audio_set_volume(70);fmo_audio_set_online(false);}
         if(waits==2){assert(starts==1);fmo_audio_set_online(true);}
         if(waits==3){assert(stops==2 && destroys==2 && codec_inits==1 && formats==1);longjmp(done,1);}
@@ -179,7 +195,7 @@ int main(void) {
     init_fail=1;assert(start_stream(&client)==ESP_ERR_NO_MEM && !client && !destroys);
     register_fail=1;assert(start_stream(&client)==ESP_FAIL && !client && destroys==1);
     register_fail=0;start_fail=1;assert(start_stream(&client)==ESP_FAIL && !client && destroys==2);
-    for(int scenario=1;scenario<=4;++scenario) {
+    for(int scenario=1;scenario<=5;++scenario) {
         reset_test(scenario);
         if(scenario==2)init_fail=2;
         if(scenario==3)codec_fail=1;
@@ -187,10 +203,19 @@ int main(void) {
         assert(!locked);
     }
     reset_test(0);
+    s_level=75;s_level_ms=clock_ms;s_accepting=true;
+    assert(fmo_audio_get_level()==75);
+    fmo_audio_set_volume(0);assert(fmo_audio_get_level()==0);
+    fmo_audio_set_volume(50);assert(fmo_audio_get_level()==0);
+    s_level=75;
+    fmo_audio_set_online(false);assert(fmo_audio_get_level()==0);
+    fmo_audio_set_online(true);assert(fmo_audio_get_level()==0);
+    s_level=75;
     reset_stream(true);
     esp_websocket_event_data_t bad={.payload_len=-1};
-    audio_event(NULL,NULL,WEBSOCKET_EVENT_DATA,&bad);assert(!s_pcm.count);
-    puts("FMO audio runtime: PASS (worker ownership, mute/offline flush, retry, format, failure isolation)");
+    s_level=75;
+    audio_event(NULL,NULL,WEBSOCKET_EVENT_DATA,&bad);assert(!s_pcm.count && !fmo_audio_get_level());
+    puts("FMO audio runtime: PASS (worker ownership, mute/offline flush, retry, format, meter freshness/reset, failure isolation)");
 }
 '''
 with tempfile.TemporaryDirectory(prefix="fmo-audio-test-") as tmp:
@@ -209,5 +234,6 @@ with tempfile.TemporaryDirectory(prefix="fmo-audio-test-") as tmp:
     binary = directory / "audio-test"
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                     "-I"+str(directory), "-I"+str(ROOT / "main"), str(directory / "test.c"),
-                    str(ROOT / "main/fmo_pcm.c"), "-o", str(binary)], check=True)
+                    str(ROOT / "main/fmo_pcm.c"), str(ROOT / "main/fmo_audio_meter.c"),
+                    "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True, timeout=15)

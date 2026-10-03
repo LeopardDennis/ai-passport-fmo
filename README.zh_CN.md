@@ -19,7 +19,10 @@
 
 竖屏界面参考所提供的 FMO 图片使用黑、橙、白配色（非官方色值规范）。中央大呼号是
 当前发言人：发言时橙色粗体，空闲时以白色粗体保留上次呼号。
-不显示网格定位码、“几秒前”或电台／本机前缀。橙色横线只表示发言活动，不是音量表，不模拟未知数据。
+不显示网格定位码、“几秒前”或电台／本机前缀。底部细黄色条显示送往播放的通联 PCM
+音频 RMS 强度，快速上升、平滑回落。它反映原始对话声音，独立于扬声器音量；关闭音频、
+断线或进入配网／菜单时清空。微弱输入被过滤，缺少音频时不显示；它不是射频信号测量值。
+不模拟未知数据。
 呼号使用 Montserrat Bold，配网密码使用内置常规字重，中文频道使用 Noto Sans CJK，
 不宣称与 FMO 原厂字体完全一致。
 状态和操作提示使用中文，呼号、网络名称及地址保持原样。iOS 风格电池图标内显示百分比
@@ -58,7 +61,9 @@ ctest --test-dir /tmp/fmo-ui-preview --output-on-failure
 /tmp/fmo-ui-preview/fmo_ui_preview onair /tmp/fmo-onair.ppm
 ```
 
-其他预览状态：`lastheard`、`offline`、`setup`（扫码）、`setup_info`（热点信息）、`network`、`long`、`error`。
+其他预览状态：`idle`、`muted`、`lastheard`、`offline`、`setup`（扫码）、
+`setup_info`（热点信息）、`network`、`long`、`rare`、`error`，以及
+`meter_low`／`meter_mid`／`meter_high`（音频强度）。
 
 最多保存五组验证成功的 Wi-Fi，自动导入旧版单网络配置。相同 SSID 的密码只有在新连接
 成功后才更新；第六个不同网络会被拒绝，需要先删除一个。配网页面只显示已保存名称，
