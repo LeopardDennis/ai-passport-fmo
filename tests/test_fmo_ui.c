@@ -229,8 +229,17 @@ int main(int argc, char **argv)
     assert(lv_obj_get_style_text_font(history_call,0)==&fmo_callsign_bold_14);
     assert(lv_color_eq(lv_obj_get_style_text_color(history_call,0),lv_color_hex(0xF4F4F4)));
     state.channel_valid=false;
+    state.control_connected=false;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    assert(find_text(lv_screen_active(),"频道确认中"));
+    assert(find_text(lv_screen_active(),"等待频道确认"));
+    assert(!find_text(lv_screen_active(),"安吉FMO中继"));
+    assert(find_text(lv_screen_active(),"正在通联"));
+    verify("BG5ESN",0xFF8A00);verify("PM01",0x929292);
+    fmo_ui_set_audio_level(60,60000);fmo_ui_set_audio_level(60,60100);
+    assert(audio_bar_width(display)>0);
     verify_dates(display,"2026-01-01 20:57:00","2026-01-01 20:55:00");
+    state.control_connected=true;
     state.channel_valid=true;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
     verify("PM01",0x929292);
@@ -323,8 +332,14 @@ int main(int argc, char **argv)
     state.events_connected = false;
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     assert(!find_text(lv_screen_active(), "BG5ESN"));
-    fmo_ui_set_audio_level(100, 61000);
-    assert(audio_bar_width(display) == 0);
+    // Losing event metadata clears the live call but does not suppress real PCM.
+    fmo_ui_set_audio_level(100, 61000);fmo_ui_set_audio_level(100, 61100);
+    assert(audio_bar_width(display) > 0);
+    state.wifi_connected=false;
+    fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    fmo_ui_set_audio_level(100,61200);
+    assert(audio_bar_width(display)==0);
+    state.wifi_connected=true;
     fmo_controls_observe_setup(&controls, true);
     controls.setup_info = true;
     fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);

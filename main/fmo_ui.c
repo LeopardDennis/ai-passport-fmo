@@ -397,12 +397,15 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
 {
     char buffer[80];
     bool setup = setup_ssid[0] != 0;
-    bool live = !setup && !error[0] && s->wifi_connected && s->events_connected &&
-                s->control_connected && s->channel_valid;
+    // Live speech belongs to /events; channel confirmation belongs to /ws.
+    // Keep receiving speech visible while channel metadata recovers, but never
+    // present the cached channel name as confirmed until a fresh reply arrives.
+    bool live = !setup && !error[0] && s->wifi_connected && s->events_connected;
+    bool channel_ready = live && s->control_connected && s->channel_valid;
     bool speaking = live && s->speaking;
     const char *link = setup ? "手机配网" : error[0] ? "网络连接异常" :
         !s->wifi_connected ? "正在连接 Wi-Fi" :
-        !s->events_connected ? "正在连接 FMO" : !live ? "正在同步频道" :
+        !s->events_connected ? "正在连接 FMO" : !channel_ready ? "频道确认中" :
         sync_hint ? "FMO 已连接 已请求刷新" : "FMO 已连接";
 
     int soc = battery >= 0 && battery <= 100 ? battery : -1;
@@ -418,14 +421,14 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         last_battery = soc;
     }
     overlay_render(controls, s->wifi_connected, setup_ssid, setup_password);
-    audio_meter_enabled = controls->view == FMO_VIEW_MONITOR && live &&
-                          controls->audio_enabled && controls->volume > 0;
+    audio_meter_enabled = controls->view == FMO_VIEW_MONITOR && !setup && !error[0] &&
+                          s->wifi_connected && controls->audio_enabled && controls->volume > 0;
     if (!audio_meter_enabled) fmo_ui_set_audio_level(0, now_ms);
     if (controls->view != FMO_VIEW_MONITOR) return;
     text(link_label, link);
-    color(link_label, error[0] ? RED : live ? WHITE : ORANGE);
+    color(link_label, error[0] ? RED : channel_ready ? WHITE : ORANGE);
     if (setup) snprintf(buffer, sizeof(buffer), "%s", setup_ssid);
-    else if (!s->channel_valid) snprintf(buffer, sizeof(buffer), "等待 FMO 连接");
+    else if (!channel_ready) snprintf(buffer, sizeof(buffer), "等待频道确认");
     else if (s->channel_name[0]) snprintf(buffer, sizeof(buffer), "%s", s->channel_name);
     else snprintf(buffer, sizeof(buffer), "频道 #%" PRIu32, s->channel_uid);
     text(channel_label, buffer);

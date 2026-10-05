@@ -68,8 +68,9 @@ restarts synchronization without allocating another service. An already synced
 clock continues during a network interruption, and wake-up redraws the current
 minute. Time synchronization requires access to the NTP server. Separate transmit/receive frequencies are not displayed.
 
-Conversation audio plays automatically after the FMO event/control connections
-are ready, at 50% volume by default. The `/audio` interface supplies 8 kHz,
+Conversation audio connects automatically once Wi-Fi is ready, at 50% volume
+by default. Its connection and activity watchdog are independent of the channel
+and event sockets: recovering metadata does not mute or discard healthy audio. The `/audio` interface supplies 8 kHz,
 16-bit signed little-endian mono PCM; the existing ES8311/I2S driver plays it
 in a separate worker. A fixed 24 KiB queue holds up to 1.536 seconds of PCM and handles split
 WebSocket messages, an initial 100 ms buffer target and underrun silence. Before
@@ -284,7 +285,11 @@ private keys, or unsanitized logs.
   creation is retried while Wi-Fi is available.
 - Channel queries run every second and after a new talker. With a confirmed
   channel, speech starts immediately on screen while the query runs in the
-  background. An unknown channel still shows synchronization. A reply from
+  background. When channel confirmation is missing, only the connection/channel
+  rows show that confirmation is pending; callsigns and grids from a connected
+  event stream remain visible. An unconfirmed cached channel name is hidden.
+  Audio and its level bar follow their own stream, even if event metadata recovers.
+  A reply from
   before the latest talker may renew an already-valid channel with the same UID
   without changing speech. Replies for a different or unknown channel are
   discarded and retried, and cannot restore an expired channel. This prevents

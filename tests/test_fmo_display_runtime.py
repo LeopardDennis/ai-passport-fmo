@@ -152,6 +152,13 @@ int main(void) {
     key(BSP_BTN_UP, BSP_BTN_LONG); assert(requests==1);
     s_state.control_connected=true; s_setup_ssid[0]=0; s_error[0]=0;
     ui_tick(NULL); assert(audio_online);
+    // Metadata sockets may recover while /audio continues independently.
+    s_state.control_connected=false; s_state.channel_valid=false;
+    ui_tick(NULL); assert(audio_online);
+    s_state.events_connected=false; ui_tick(NULL); assert(audio_online);
+    strcpy(s_setup_ssid,"FMO-Setup-TEST"); ui_tick(NULL); assert(!audio_online);
+    s_setup_ssid[0]=0; strcpy(s_error,"DATA RESET FAILED"); ui_tick(NULL); assert(!audio_online);
+    s_error[0]=0; ui_tick(NULL); assert(audio_online);
     s_state.wifi_connected=false; ui_tick(NULL); assert(!audio_online);
     puts("FMO display runtime: PASS (gesture, redraw, PTT/setup, failure recovery)");
 }

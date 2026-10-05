@@ -179,8 +179,9 @@ static void ui_tick(lv_timer_t *timer)
         dirty = true;
     }
 
-    fmo_audio_set_online(s_state.wifi_connected && s_state.events_connected &&
-                         s_state.control_connected && !s_setup_ssid[0] && !s_error[0]);
+    // /audio owns its connection and activity watchdog. A channel query or
+    // event-socket recovery must not flush a healthy audio stream.
+    fmo_audio_set_online(s_state.wifi_connected && !s_setup_ssid[0] && !s_error[0]);
     uint64_t now_ms = monotonic_ms();
     if (!update_display(now_ms)) return;
     uint64_t current_second = now_ms / 1000;

@@ -73,11 +73,18 @@ static fmo_socket_t s_control_socket = { .kind = FMO_SOCKET_CONTROL };
 
 /* Serialize producers before publishing a one-slot, overwriteable snapshot.
  * A slow UI cannot drop the final transition or restore an older snapshot. */
+static unsigned link_state_bits(const fmo_monitor_state_t *state)
+{
+    return (state->wifi_connected ? 1u : 0u) | (state->events_connected ? 2u : 0u) |
+           (state->control_connected ? 4u : 0u) | (state->channel_valid ? 8u : 0u);
+}
+
 static void post_update(const fmo_update_t *update)
 {
     bool refresh = false;
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
     fmo_monitor_state_t *state = &s_snapshot.state;
+    unsigned previous_links = link_state_bits(state);
     switch (update->type) {
     case FMO_UPDATE_WIFI:
         fmo_monitor_set_wifi(state, update->connected);
@@ -133,6 +140,10 @@ static void post_update(const fmo_update_t *update)
         snprintf(s_snapshot.error, sizeof(s_snapshot.error), "%s", update->text);
         break;
     }
+    if (previous_links != link_state_bits(state))
+        ESP_LOGI(TAG, "Link state: wifi=%d events=%d control=%d channel=%d",
+                 state->wifi_connected, state->events_connected,
+                 state->control_connected, state->channel_valid);
     xQueueOverwrite(s_update_queue, &s_snapshot);
     xSemaphoreGive(s_state_lock);
     if (refresh) fmo_network_request_refresh();

@@ -333,6 +333,7 @@ esp_err_t fmo_audio_start(void)
 void fmo_audio_set_online(bool online)
 {
     if (atomic_exchange(&s_online, online) != online) {
+        ESP_LOGI(TAG, "Audio network ready=%d", online);
         if (!online) clear_level();
         if (s_task) xTaskNotifyGive(s_task);
     }

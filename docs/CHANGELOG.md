@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Separate conversation audio from channel/event metadata recovery: Wi-Fi-ready audio retains its own reconnect/watchdog lifecycle, while Wi-Fi loss, setup, startup errors and mute still stop playback. Render live callsigns/grids from the event connection independently of channel confirmation; show a pending-confirmation hint only in the connection/channel rows and hide the unconfirmed cached channel name. Keep real PCM metering during metadata outages and add aggregate link-state/audio-readiness diagnostics. Verify production UI-timer routing, confirmation-outage rendering, recovery, setup/error/Wi-Fi stop conditions and native layout. This revision requires on-device validation.
+
 - Prevent same-channel confirmation starvation across talker changes while retaining stale-reply protection for different, unknown or expired channels; log expiry and invalid live metadata. Add bounded whole-message receive backpressure to avoid immediately dropping audio bursts in the existing 24 KiB ring. Replace audio PONG-only disconnection with a 90-second valid PCM/heartbeat activity watchdog; preserve TCP-error recovery and mute/offline cleanup. Regression coverage includes sustained bursts, maximum-size messages, interrupted waits, busy-stream liveness, idle recovery and repeated talker changes. Physical playback and the reported transient sync incident require validation with this image.
 
 - Rename the active-speaker status label to In Contact; keep the last-contact label after speech ends.

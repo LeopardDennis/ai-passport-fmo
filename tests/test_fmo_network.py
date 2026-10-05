@@ -33,7 +33,7 @@ def run():
     header = (ROOT / "main/fmo_network.h").read_text()
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
-        "update_clock_service", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "expire_channel", "cleanup_wifi", "prepare_network", "post_link"))
+        "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "expire_channel", "cleanup_wifi", "prepare_network", "post_link"))
     preamble = r'''
 #include "fmo_monitor_state.h"
 #include "fmo_text.h"
@@ -47,6 +47,7 @@ def run():
 #include <string.h>
 #define portMAX_DELAY 0
 #define ESP_LOGW(...) ((void)0)
+#define ESP_LOGI(...) ((void)0)
 typedef enum { FMO_SOCKET_EVENTS, FMO_SOCKET_CONTROL } fmo_socket_kind_t;
 typedef struct { fmo_socket_kind_t kind; int client; fmo_ws_rx_t rx; } fmo_socket_t;
 typedef struct {
