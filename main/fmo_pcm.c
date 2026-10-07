@@ -3,13 +3,44 @@
 
 void fmo_pcm_reset(fmo_pcm_t *pcm)
 {
-    memset(pcm, 0, sizeof(*pcm));
+    /* Counts are the only authority for readable audio. Leave the 24 KiB
+     * backing array untouched: reset runs with interrupts masked on the C3.
+     * Uncommitted/stale samples remain inaccessible after every reset. */
+    memset((char *)pcm + offsetof(fmo_pcm_t, head), 0,
+           sizeof(*pcm) - offsetof(fmo_pcm_t, head));
 }
 
 size_t fmo_pcm_message_reserve(uint8_t opcode, bool fin, size_t frame_length, size_t offset)
 {
     if (opcode != 2 || offset || frame_length > FMO_PCM_MESSAGE_BYTES) return 0;
     return fin ? (frame_length + 1) / 2 : FMO_PCM_MESSAGE_BYTES / 2;
+}
+
+/* PCM is little-endian; memcpy also permits unaligned network payloads.
+ * Keep a portable conversion path for hosts with a different byte order. */
+static void copy_samples(int16_t *out, const uint8_t *bytes, size_t count)
+{
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    memcpy(out, bytes, count * sizeof(*out));
+#else
+    for (size_t i = 0; i < count; ++i) {
+        uint16_t value = (uint16_t)bytes[2 * i] | ((uint16_t)bytes[2 * i + 1] << 8);
+        out[i] = value <= INT16_MAX ? (int16_t)value : (int16_t)((int32_t)value - 65536);
+    }
+#endif
+}
+
+/* Space has already been reserved/dropped for this whole receive fragment.
+ * A ring wrap needs at most two contiguous copies, never per-sample modulo. */
+static void append_samples(fmo_pcm_t *p, const uint8_t *bytes, size_t count)
+{
+    if (!count) return;
+    size_t tail = (p->head + p->count + p->pending_count) % FMO_PCM_CAPACITY;
+    size_t first = FMO_PCM_CAPACITY - tail;
+    if (first > count) first = count;
+    copy_samples(p->samples + tail, bytes, first);
+    if (count > first) copy_samples(p->samples, bytes + first * 2, count - first);
+    p->pending_count += count;
 }
 
 fmo_pcm_result_t fmo_pcm_feed(fmo_pcm_t *p, uint8_t opcode, bool fin,
@@ -36,24 +67,30 @@ fmo_pcm_result_t fmo_pcm_feed(fmo_pcm_t *p, uint8_t opcode, bool fin,
         p->opcode != opcode || p->fin != fin ||
         frame_length - offset > FMO_PCM_MESSAGE_BYTES - p->message_length) goto invalid;
     const uint8_t *bytes = data;
-    /* Decode immediately in bounded chunks; FMO currently sends 5120-byte
-     * messages. Do not allocate a second whole-message buffer in internal RAM. */
-    for (size_t i = 0; i < length; ++i) {
-        if (!p->partial_sample) {
-            p->low_byte = bytes[i];
-            p->partial_sample = true;
-            continue;
-        }
-        uint16_t value = (uint16_t)p->low_byte | ((uint16_t)bytes[i] << 8);
-        int32_t signed_value = value <= INT16_MAX ? (int32_t)value : (int32_t)value - 65536;
-        if (p->count + p->pending_count == FMO_PCM_CAPACITY) {
-            if (!p->count) goto invalid;
-            p->head = (p->head + 1) % FMO_PCM_CAPACITY;
-            --p->count;
-            ++p->dropped_samples;
-        }
-        p->samples[(p->head + p->count + p->pending_count++) % FMO_PCM_CAPACITY] = (int16_t)signed_value;
+    size_t incoming = (length + (p->partial_sample ? 1 : 0)) / 2;
+    size_t free_samples = FMO_PCM_CAPACITY - p->count - p->pending_count;
+    if (incoming > free_samples) {
+        size_t dropped = incoming - free_samples;
+        if (dropped > p->count) goto invalid; /* Never expose/drop partial messages. */
+        p->head = (p->head + dropped) % FMO_PCM_CAPACITY;
+        p->count -= dropped;
+        p->dropped_samples += (uint32_t)dropped;
+    }
+    size_t remaining = length;
+    if (p->partial_sample && remaining) {
+        uint8_t pair[2] = {p->low_byte, *bytes++};
+        append_samples(p, pair, 1);
+        --remaining;
         p->partial_sample = false;
+    }
+    size_t pairs = remaining / 2;
+    if (pairs) {
+        append_samples(p, bytes, pairs);
+        bytes += pairs * 2;
+    }
+    if (remaining & 1) {
+        p->low_byte = *bytes;
+        p->partial_sample = true;
     }
     p->message_length += length;
     p->frame_offset += length;
@@ -79,17 +116,22 @@ invalid:
 
 size_t fmo_pcm_read(fmo_pcm_t *p, int16_t *output, size_t samples, uint64_t now_ms)
 {
-    memset(output, 0, samples * sizeof(*output));
+    size_t available = 0;
     if (!p->count) {
         if (now_ms - p->last_ms >= 120) p->started = false;
-        return 0;
+    } else if (p->started || p->count >= FMO_PCM_START_SAMPLES || now_ms - p->first_ms >= 60) {
+        p->started = true;
+        available = p->count < samples ? p->count : samples;
+        size_t first = FMO_PCM_CAPACITY - p->head;
+        if (first > available) first = available;
+        memcpy(output, p->samples + p->head, first * sizeof(*output));
+        if (available > first)
+            memcpy(output + first, p->samples, (available - first) * sizeof(*output));
+        p->head = (p->head + available) % FMO_PCM_CAPACITY;
+        p->count -= available;
     }
-    if (!p->started && p->count < FMO_PCM_START_SAMPLES && now_ms - p->first_ms < 60) return 0;
-    p->started = true;
-    size_t available = p->count < samples ? p->count : samples;
-    for (size_t i = 0; i < available; ++i)
-        output[i] = p->samples[(p->head + i) % FMO_PCM_CAPACITY];
-    p->head = (p->head + available) % FMO_PCM_CAPACITY;
-    p->count -= available;
+    /* Only pad the missing tail; do not clear samples that were just copied. */
+    if (samples > available)
+        memset(output + available, 0, (samples - available) * sizeof(*output));
     return available;
 }

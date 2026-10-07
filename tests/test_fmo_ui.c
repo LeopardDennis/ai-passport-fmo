@@ -10,8 +10,10 @@ LV_FONT_DECLARE(fmo_callsign_bold_20);
 LV_FONT_DECLARE(fmo_callsign_bold_32);
 static uint16_t pixels[240 * 320];
 static uint8_t buffer[240 * 20 * 2];
+static unsigned flushes;
 static void flush(lv_display_t *display, const lv_area_t *a, uint8_t *p)
 {
+    ++flushes;
     for (int y = a->y1; y <= a->y2; ++y) {
         memcpy(pixels + y * 240 + a->x1, p, (a->x2 - a->x1 + 1) * 2);
         p += (a->x2 - a->x1 + 1) * 2;
@@ -155,8 +157,20 @@ int main(int argc, char **argv)
     verify_clock_center();
     fmo_ui_set_clock(INT64_C(1767272280)); /* 2026-01-01 20:58 Beijing */
     assert(find_text(lv_screen_active(),"20:58"));
+    lv_refr_now(display);
+    flushes = 0;
+    for (unsigned second = 1; second < 60; ++second)
+        fmo_ui_set_clock(INT64_C(1767272280) + second);
+    lv_refr_now(display);
+    assert(flushes == 0); /* Same minute does not redraw or move the clock. */
     fmo_ui_set_clock(INT64_C(1767272340));
     assert(find_text(lv_screen_active(),"20:59"));
+    fmo_ui_set_clock(INT64_C(1767272280)); /* Backward clock correction. */
+    assert(find_text(lv_screen_active(),"20:58"));
+    fmo_ui_set_clock(INT64_C(4102444800));
+    assert(find_text(lv_screen_active(),"--:--"));
+    fmo_ui_set_clock(INT64_C(4102444799));
+    assert(find_text(lv_screen_active(),"07:59"));
     fmo_ui_set_clock(0);
     assert(find_text(lv_screen_active(),"--:--"));
     lv_refr_now(display);
@@ -174,6 +188,40 @@ int main(int argc, char **argv)
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     assert(find_text(lv_screen_active(), "正在通联"));
     assert(find_text(lv_screen_active(), "音频: 50%  长按OK: 配网"));
+    lv_refr_now(display);
+    flushes = 0;
+    for (unsigned i = 0; i < 120; ++i) {
+        state.channel_confirmed_ms = 12000 + i * 1000;
+        fmo_ui_render(&state, "", "", "", 82, 12000 + i * 1000, false, &controls);
+        fmo_ui_set_clock(INT64_C(1767272280) + i % 60);
+    }
+    lv_refr_now(display);
+    assert(flushes == 0); /* Fresh channel confirmations have no visible changes. */
+    state.history.entries[0].timestamp += 60;
+    fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
+    verify_dates(display, "2026-01-01 20:58:00", "2026-01-01 20:55:00");
+    state.history.entries[0].timestamp -= 60;
+    fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
+    verify_dates(display, "2026-01-01 20:57:00", "2026-01-01 20:55:00");
+    /* Recreated widgets must render the same snapshot after leaving a menu. */
+    controls.view = FMO_VIEW_NETWORK;
+    fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
+    lv_refr_now(display);
+    flushes = 0;
+    fmo_ui_render(&state, "", "", "", 82, 13000, false, &controls);
+    lv_refr_now(display);
+    assert(flushes == 0);
+    controls.selection = 1;
+    fmo_ui_render(&state, "", "", "", 82, 13000, false, &controls);
+    lv_refr_now(display);
+    assert(flushes > 0);
+    controls.selection = 0;
+    controls.view = FMO_VIEW_MONITOR;
+    fmo_ui_render(&state, "", "", "", 82, 14000, false, &controls);
+    verify_dates(display, "2026-01-01 20:57:00", "2026-01-01 20:55:00");
+    verify("BG5ESN", 0xFF8A00);
+    verify("PM01", 0x929292);
+
     /* Measure real rendered pixels: speech metadata alone must not light the
      * bar. PCM animates width and silence erases the old, longer rectangle. */
     assert(audio_bar_width(display) == 0);

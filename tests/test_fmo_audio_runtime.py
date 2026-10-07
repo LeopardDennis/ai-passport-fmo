@@ -41,7 +41,7 @@ void fmo_provision_get_endpoint(fmo_endpoint_t *endpoint);
 typedef enum {WIFI_PS_NONE, WIFI_PS_MIN_MODEM, WIFI_PS_MAX_MODEM} wifi_ps_type_t;
 esp_err_t esp_wifi_get_ps(wifi_ps_type_t *ps);
 esp_err_t esp_wifi_set_ps(wifi_ps_type_t ps);
-esp_err_t bsp_audio_init(void);
+esp_err_t bsp_audio_init_playback(void);
 esp_err_t bsp_audio_set_format(uint32_t rate,uint8_t bits,uint8_t channels);
 void bsp_audio_set_volume(uint8_t percent);
 esp_err_t bsp_audio_write(const void *pcm,size_t bytes);
@@ -114,7 +114,7 @@ void vTaskDelay(unsigned ticks) {
     }
 }
 void fmo_provision_get_endpoint(fmo_endpoint_t *e) {strcpy(e->host,"fmo.test");e->port=8080;}
-esp_err_t bsp_audio_init(void) {assert(!locked);++codec_inits;return codec_fail ? ESP_FAIL : ESP_OK;}
+esp_err_t bsp_audio_init_playback(void) {assert(!locked);++codec_inits;return codec_fail ? ESP_FAIL : ESP_OK;}
 esp_err_t bsp_audio_set_format(uint32_t rate,uint8_t bits,uint8_t channels) {
     assert(!locked && rate==8000 && bits==16 && channels==1);++formats;return ESP_OK;
 }

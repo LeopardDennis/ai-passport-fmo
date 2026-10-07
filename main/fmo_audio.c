@@ -221,7 +221,7 @@ static void audio_task(void *argument)
                 /* The BSP has no deinit API. Try initialization once to avoid
                  * leaking partially initialized I2S/codec resources on retries. */
                 codec_attempted = true;
-                esp_err_t err = bsp_audio_init();
+                esp_err_t err = bsp_audio_init_playback();
                 if (err == ESP_OK) err = bsp_audio_set_format(FMO_PCM_RATE, 16, 1);
                 codec_ready = err == ESP_OK;
                 if (!codec_ready) ESP_LOGW(TAG, "Audio unavailable: %s", esp_err_to_name(err));

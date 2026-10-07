@@ -193,6 +193,14 @@ I2C0 使用 SDA GPIO10、SCL GPIO7。ES8311 地址为 7 bit `0x18`，CW2017 为 
 
 ## 8. ES8311 音频
 
+FMO 使用 `bsp_audio_init_playback()`，只分配 TX、将 DIN 设为未使用，并选择
+ES8311 DAC/OUT 模式，不配置麦克风增益。原 `bsp_audio_init()` 保留全双工播放／录音。
+由单一音频 worker 在设备运行期间持有所选模式：相同模式重复初始化幂等；
+切换模式返回 `ESP_ERR_INVALID_STATE`，需要重启。仅播放模式调用录音接口也返回
+`ESP_ERR_INVALID_STATE`。部分初始化失败后不可重试，BSP 尚无资源清理接口。
+TX DMA 大小、格式切换和播放时序不变。真机应验证 8 kHz 播放、静音／恢复、重连和
+格式切换，并测量内部堆／DMA 可用量与电流后再确认收益。
+
 MCU 是 I2S master，ES8311 是 slave；I2S0 的 TX/RX 全双工通道共享 MCLK/BCLK/WS。当前数据通路为标准 I2S、16 bit slot 设置、双 slot 物理总线，但对外演示以 16 kHz/16 bit/单声道 PCM 打开 codec。
 
 | 信号 | GPIO | 数据方向 |

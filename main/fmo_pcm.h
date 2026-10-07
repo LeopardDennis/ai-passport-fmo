@@ -20,6 +20,8 @@ typedef struct {
 } fmo_pcm_t;
 
 typedef enum { FMO_PCM_MORE, FMO_PCM_COMPLETE, FMO_PCM_IGNORED, FMO_PCM_INVALID } fmo_pcm_result_t;
+/* Reset readable metadata only; backing samples are retained but inaccessible.
+ * This is not a secure erasure API. Caller serializes with feed/read. */
 void fmo_pcm_reset(fmo_pcm_t *pcm);
 /* Reserve a whole new message before accepting its first chunk. Continuations
  * already own their space; an unknown fragmented length reserves the maximum. */

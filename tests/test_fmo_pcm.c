@@ -20,6 +20,45 @@ static void feed_frame(uint64_t now)
         assert(result==(offset+1024==sizeof(frame) ? FMO_PCM_COMPLETE : FMO_PCM_MORE));
     }
 }
+/* Vary odd/unaligned receive fragments while draining committed audio. Track
+ * a reference sample sequence through both ring wraps and bounded overflow. */
+static void verify_ring_stream(void)
+{
+    fmo_pcm_reset(&pcm);
+    for (unsigned i = 0; i < 6; ++i) feed_frame(1000 + i);
+    size_t next = pcm.dropped_samples;
+    uint32_t dropped = pcm.dropped_samples, random = 17;
+    for (unsigned message = 0; message < 80; ++message) {
+        size_t offset = 0;
+        uint64_t now = 2000 + message * 320;
+        while (offset < sizeof(frame)) {
+            random = random * 1664525U + 1013904223U;
+            size_t chunk = 1 + random % 1024;
+            if (chunk > sizeof(frame) - offset) chunk = sizeof(frame) - offset;
+            fmo_pcm_result_t result = fmo_pcm_feed(&pcm, 2, true, sizeof(frame),
+                                                  offset, frame + offset, chunk, now);
+            offset += chunk;
+            assert(result == (offset == sizeof(frame) ? FMO_PCM_COMPLETE : FMO_PCM_MORE));
+            next += pcm.dropped_samples - dropped;
+            dropped = pcm.dropped_samples;
+            size_t count = fmo_pcm_read(&pcm, output, FMO_PCM_CHUNK_SAMPLES, now);
+            for (size_t i = 0; i < count; ++i)
+                assert(output[i] == (int16_t)((int)((next + i) % 2560) - 1280));
+            for (size_t i = count; i < FMO_PCM_CHUNK_SAMPLES; ++i) assert(output[i] == 0);
+            next += count;
+        }
+    }
+    while (pcm.count) {
+        size_t count = fmo_pcm_read(&pcm, output, FMO_PCM_CHUNK_SAMPLES, 100000);
+        assert(count);
+        for (size_t i = 0; i < count; ++i)
+            assert(output[i] == (int16_t)((int)((next + i) % 2560) - 1280));
+        for (size_t i = count; i < FMO_PCM_CHUNK_SAMPLES; ++i) assert(output[i] == 0);
+        next += count;
+    }
+    assert(next == (6 + 80) * 2560);
+}
+
 int main(void)
 {
     assert(fmo_pcm_message_reserve(2,true,5120,0)==2560);
@@ -132,5 +171,19 @@ int main(void)
     assert(output[0]==-768); /* Dropped 3072 oldest samples across frame boundaries. */
     fmo_pcm_reset(&pcm);
     assert(fmo_pcm_read(&pcm,output,160,6020)==0 && output[0]==0);
+    verify_ring_stream();
+    /* Reset must hide both committed and pending backing samples, even when
+     * the backing array is deliberately left dirty by a metadata-only reset. */
+    feed_frame(110000);
+    assert(fmo_pcm_feed(&pcm, 2, true, 5120, 0, frame, 1, 110001) == FMO_PCM_MORE);
+    fmo_pcm_reset(&pcm);
+    assert(!pcm.count && !pcm.pending_count && !pcm.partial_sample && !pcm.active);
+    memset(output, 0x5a, sizeof(output));
+    assert(fmo_pcm_read(&pcm, output, FMO_PCM_CHUNK_SAMPLES, 110100) == 0);
+    for (size_t i = 0; i < FMO_PCM_CHUNK_SAMPLES; ++i) assert(output[i] == 0);
+    assert(fmo_pcm_feed(&pcm, 2, true, 2, 0, signed_samples, 2, 110200) == FMO_PCM_COMPLETE);
+    assert(fmo_pcm_read(&pcm, output, FMO_PCM_CHUNK_SAMPLES, 110260) == 1);
+    assert(output[0] == INT16_MIN);
+    for (size_t i = 1; i < FMO_PCM_CHUNK_SAMPLES; ++i) assert(output[i] == 0);
     puts("FMO PCM: PASS (live frame size, chunk splits, signed PCM, burst continuity, full-second message, buffering, overflow, reset)");
 }

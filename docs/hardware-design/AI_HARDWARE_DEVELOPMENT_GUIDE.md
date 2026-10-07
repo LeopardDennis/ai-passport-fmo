@@ -147,6 +147,17 @@ Troubleshoot in order: bus-init log, scan results for `0x18`/`0x63`, power/groun
 
 ## 8. ES8311 audio
 
+FMO calls `bsp_audio_init_playback()` to allocate only TX, leave DIN unused and
+select ES8311 DAC/OUT mode without microphone gain configuration. The existing
+`bsp_audio_init()` retains full-duplex playback/recording. A single audio worker
+owns either mode for the device lifetime: repeated initialization in the same
+mode is idempotent; switching modes returns `ESP_ERR_INVALID_STATE` and requires
+a reboot. Reading in playback-only mode also returns `ESP_ERR_INVALID_STATE`.
+Partial initialization failure is not retryable; no BSP cleanup API exists yet.
+TX DMA sizing, format changes and playback timing remain unchanged. Validate
+8 kHz playback, mute/unmute, reconnects and format changes on hardware, and
+measure internal heap/DMA availability and current before claiming savings.
+
 The MCU is I2S master and the ES8311 is slave. I2S0 TX/RX shares MCLK GPIO6, BCLK GPIO5, and WS GPIO3; DOUT is GPIO2 and DIN is GPIO4. The demo opens 16 kHz, 16-bit, mono PCM over a physically two-slot standard-I2S bus.
 
 - Call `bsp_audio_set_format()` before PCM I/O.

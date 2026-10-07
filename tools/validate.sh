@@ -59,6 +59,7 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_fmo_audio_meter.c main/fmo_audio_meter.c -o "${test_dir}/test_fmo_audio_meter"
     "${test_dir}/test_fmo_audio_meter"
+    python3 tests/test_bsp_audio_runtime.py
     python3 tests/test_fmo_audio_runtime.py
     python3 tests/test_compact_font.py
     python3 tests/test_fmo_storage.py

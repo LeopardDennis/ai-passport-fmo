@@ -44,14 +44,20 @@ static int last_battery = -2;
 static lv_obj_t *air_label, *callsign_label, *grid_label, *hint_label;
 static lv_obj_t *qso_panel, *qso_labels[FMO_HISTORY_COUNT];
 static char qso_times[FMO_HISTORY_COUNT][20];
+static int64_t qso_stamps[FMO_HISTORY_COUNT];
+static bool qso_present[FMO_HISTORY_COUNT];
+static bool callsign_layout_valid, callsign_setup;
+static int64_t clock_minute = INT64_MIN;
 static fmo_audio_meter_t audio_meter;
 static bool audio_meter_enabled;
 static int audio_bar_width;
 static int audio_bar_top = ACTIVITY_TOP;
 
-static void text(lv_obj_t *label, const char *value)
+static bool text(lv_obj_t *label, const char *value)
 {
-    if (strcmp(lv_label_get_text(label), value)) lv_label_set_text(label, value);
+    if (!strcmp(lv_label_get_text(label), value)) return false;
+    lv_label_set_text(label, value);
+    return true;
 }
 
 static void color(lv_obj_t *obj, uint32_t value)
@@ -134,8 +140,8 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
     }
     overlay_view = view;
     overlay_info = controls->setup_info;
-    snprintf(overlay_ssid, sizeof(overlay_ssid), "%s", ssid);
-    snprintf(overlay_password, sizeof(overlay_password), "%s", password);
+    if (strcmp(overlay_ssid, ssid)) snprintf(overlay_ssid, sizeof(overlay_ssid), "%s", ssid);
+    if (strcmp(overlay_password, password)) snprintf(overlay_password, sizeof(overlay_password), "%s", password);
     if (view == FMO_VIEW_MONITOR) {
         if (!monitor_content) create_monitor();
         return;
@@ -220,7 +226,9 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
     if (view == FMO_VIEW_NETWORK) {
         text(menu_status, connected ? "Wi-Fi 已连接" : "Wi-Fi 未连接");
         for (unsigned i = 0; i < 3; ++i) {
-            lv_obj_set_style_bg_color(menu_rows[i], lv_color_hex(i == controls->selection ? ORANGE : LINE), 0);
+            lv_color_t fill = lv_color_hex(i == controls->selection ? ORANGE : LINE);
+            if (!lv_color_eq(lv_obj_get_style_bg_color(menu_rows[i], 0), fill))
+                lv_obj_set_style_bg_color(menu_rows[i], fill, 0);
             color(menu_labels[i], i == controls->selection ? BLACK : WHITE);
         }
     }
@@ -235,6 +243,7 @@ void fmo_ui_create(void)
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *brand = label(screen, 12, 10, 70, &lv_font_montserrat_20, ORANGE, "FMO");
     center_ink(brand, 0, 32, 'H');
+    clock_minute = INT64_MIN;
     clock_label = label(screen, (240 - 72) / 2, 8, 72, &lv_font_montserrat_20, WHITE, "--:--");
     lv_obj_set_style_text_align(clock_label, LV_TEXT_ALIGN_CENTER, 0);
     center_ink(clock_label, 0, 32, 'H');
@@ -256,10 +265,14 @@ void fmo_ui_create(void)
 
 void fmo_ui_set_clock(int64_t unix_seconds)
 {
+    /* Validity boundaries in fmo_clock_format are minute-aligned. A backward
+     * SNTP correction or invalid-to-valid transition also changes this key. */
+    int64_t minute = unix_seconds / 60;
+    if (minute == clock_minute) return;
+    clock_minute = minute;
     char time_text[6];
     fmo_clock_format(unix_seconds, time_text);
-    text(clock_label, time_text);
-    center_ink(clock_label, 0, 32, 'H');
+    if (text(clock_label, time_text)) center_ink(clock_label, 0, 32, 'H');
 }
 
 static void audio_bar_area(lv_obj_t *obj, lv_area_t *area, int width)
@@ -349,6 +362,11 @@ static void draw_qso_times(lv_event_t *event)
 
 static void create_monitor(void)
 {
+    /* Widgets are recreated after overlays; cached layout/date state must not
+     * suppress the first render even when the network snapshot is unchanged. */
+    callsign_layout_valid = false;
+    memset(qso_stamps, 0, sizeof(qso_stamps));
+    memset(qso_present, 0, sizeof(qso_present));
     lv_obj_t *screen = rect(lv_screen_active(), 0, 0, 240, 320, BLACK);
     monitor_content = screen;
     lv_obj_move_background(screen);
@@ -358,6 +376,7 @@ static void create_monitor(void)
     channel_label = label(channel, 8, 0, 200, &fmo_channel_font, BLACK, "--");
     lv_obj_set_style_text_align(channel_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(channel_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    center_ink(channel_label, 0, CHANNEL_HEIGHT, 'H');
     qso_panel = rect(screen, 12, QSO_TOP, 216, 129, BLACK);
     lv_obj_set_style_border_color(qso_panel, lv_color_hex(ORANGE), 0);
     lv_obj_set_style_border_width(qso_panel, 1, 0);
@@ -425,17 +444,18 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
                           s->wifi_connected && controls->audio_enabled && controls->volume > 0;
     if (!audio_meter_enabled) fmo_ui_set_audio_level(0, now_ms);
     if (controls->view != FMO_VIEW_MONITOR) return;
-    text(link_label, link);
+    if (text(link_label, link)) center_ink(link_label, LINK_TOP, LINK_HEIGHT, 'H');
     color(link_label, error[0] ? RED : channel_ready ? WHITE : ORANGE);
     if (setup) snprintf(buffer, sizeof(buffer), "%s", setup_ssid);
     else if (!channel_ready) snprintf(buffer, sizeof(buffer), "等待频道确认");
     else if (s->channel_name[0]) snprintf(buffer, sizeof(buffer), "%s", s->channel_name);
     else snprintf(buffer, sizeof(buffer), "频道 #%" PRIu32, s->channel_uid);
-    text(channel_label, buffer);
-    bool non_ascii = false;
-    for (const unsigned char *p = (const unsigned char *)buffer; *p; ++p)
-        if (*p >= 0x80) { non_ascii = true; break; }
-    center_ink(channel_label, 0, CHANNEL_HEIGHT, non_ascii ? 0x4E2D : 'H');
+    if (text(channel_label, buffer)) {
+        bool non_ascii = false;
+        for (const unsigned char *p = (const unsigned char *)buffer; *p; ++p)
+            if (*p >= 0x80) { non_ascii = true; break; }
+        center_ink(channel_label, 0, CHANNEL_HEIGHT, non_ascii ? 0x4E2D : 'H');
+    }
     const char *call = "--";
     const char *air = live ? "等待电台发言" : "等待频道同步";
     if (setup) {
@@ -452,9 +472,9 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
                  "数据清理失败 请重试" : !strcmp(error, "SETUP SAVE FAILED") ?
                  "配网设置保存失败" : "网络启动失败 请重试";
     }
-    text(air_label, air);
+    if (text(air_label, air)) center_ink(air_label, AIR_TOP, AIR_HEIGHT, 'H');
     color(air_label, speaking || setup ? ORANGE : MUTED);
-    text(callsign_label, call);
+    bool call_changed = text(callsign_label, call);
     color(callsign_label, speaking ? (s->speaker_cross_server ? CROSS_SERVER_COLOR : ORANGE) : WHITE);
     /* Use real bold glyphs for callsigns; keep setup passwords in regular text.
      * Measure the selected weight before fitting long suffixes at 20px. */
@@ -463,49 +483,57 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     /* A release retains the last speaker's grid; the next start replaces it,
      * including clearing it when that talker supplies no grid. */
     const char *grid = !setup && live && s->last_speaker[0] ? s->grid : "";
-    lv_point_t grid_size = {0}, size;
-    if (grid[0]) lv_text_get_size(&grid_size, grid, &fmo_channel_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    int call_space = 216 - (grid[0] ? grid_size.x + 8 : 0);
-    lv_text_get_size(&size, call, large, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    const lv_font_t *font = size.x > call_space ? small : large;
-    if (lv_obj_get_style_text_font(callsign_label, 0) != font)
-        lv_obj_set_style_text_font(callsign_label, font, 0);
-    lv_text_get_size(&size, call, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    int call_width = grid[0] && size.x < call_space ? size.x : call_space;
-    lv_obj_set_width(callsign_label, call_width);
-    int ink_bottom = center_ink(callsign_label, CALLSIGN_TOP, 32, 'H');
-    text(grid_label, grid);
-    if (grid[0]) {
-        lv_obj_remove_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_x(grid_label, 12 + call_width + 8);
-        lv_obj_set_width(grid_label, grid_size.x);
-        int grid_bottom = center_ink(grid_label, CALLSIGN_TOP, 32, 'H');
-        if (grid_bottom > ink_bottom) ink_bottom = grid_bottom;
-    } else lv_obj_add_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
-    position_audio_bar(ink_bottom);
+    bool grid_changed = text(grid_label, grid);
+    if (!callsign_layout_valid || call_changed || grid_changed || setup != callsign_setup) {
+        lv_point_t grid_size = {0}, size;
+        if (grid[0]) lv_text_get_size(&grid_size, grid, &fmo_channel_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        int call_space = 216 - (grid[0] ? grid_size.x + 8 : 0);
+        lv_text_get_size(&size, call, large, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        const lv_font_t *font = size.x > call_space ? small : large;
+        if (lv_obj_get_style_text_font(callsign_label, 0) != font)
+            lv_obj_set_style_text_font(callsign_label, font, 0);
+        if (font != large)
+            lv_text_get_size(&size, call, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        int call_width = grid[0] && size.x < call_space ? size.x : call_space;
+        lv_obj_set_width(callsign_label, call_width);
+        int ink_bottom = center_ink(callsign_label, CALLSIGN_TOP, 32, 'H');
+        if (grid[0]) {
+            lv_obj_remove_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_x(grid_label, 12 + call_width + 8);
+            lv_obj_set_width(grid_label, grid_size.x);
+            int grid_bottom = center_ink(grid_label, CALLSIGN_TOP, 32, 'H');
+            if (grid_bottom > ink_bottom) ink_bottom = grid_bottom;
+        } else lv_obj_add_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
+        position_audio_bar(ink_bottom);
+        callsign_layout_valid = true;
+        callsign_setup = setup;
+    }
     bool history_online = !setup && !error[0] && s->wifi_connected && s->events_connected;
     for (unsigned i = 0; i < FMO_HISTORY_COUNT; ++i) {
         bool present = history_online && i < s->history.count;
-        char stamp[20];
-        if (present) fmo_clock_format_history(s->history.entries[i].timestamp, stamp);
-        else memcpy(stamp, "---------- --:--:--", sizeof(stamp));
-        text(qso_labels[i], present ? s->history.entries[i].callsign : "--");
-        if (strcmp(qso_times[i], stamp)) {
-            memcpy(qso_times[i], stamp, sizeof(stamp));
-            lv_obj_invalidate(qso_panel);
+        int64_t stamp = present ? s->history.entries[i].timestamp : 0;
+        if (present != qso_present[i] || stamp != qso_stamps[i]) {
+            char formatted[20];
+            if (present) fmo_clock_format_history(stamp, formatted);
+            else memcpy(formatted, "---------- --:--:--", sizeof(formatted));
+            if (strcmp(qso_times[i], formatted)) {
+                memcpy(qso_times[i], formatted, sizeof(formatted));
+                lv_obj_invalidate(qso_panel);
+            }
+            qso_present[i] = present;
+            qso_stamps[i] = stamp;
+        }
+        if (text(qso_labels[i], present ? s->history.entries[i].callsign : "--")) {
+            int top = QSO_ROWS_TOP + QSO_ROW_HEIGHT * i;
+            center_ink(qso_labels[i], top, QSO_TEXT_HEIGHT, 'H');
         }
         color(qso_labels[i], present ? WHITE : MUTED);
-        int top = QSO_ROWS_TOP + QSO_ROW_HEIGHT * i;
-        center_ink(qso_labels[i], top, QSO_TEXT_HEIGHT, 'H');
     }
     if (setup) {
-        text(hint_label, "浏览器: 192.168.9.1");
+        snprintf(buffer, sizeof(buffer), "浏览器: 192.168.9.1");
     } else {
         snprintf(buffer, sizeof(buffer), "音频: %u%%  长按OK: 配网",
                  controls->audio_enabled ? controls->volume : 0);
-        text(hint_label, buffer);
     }
-    center_ink(link_label, LINK_TOP, LINK_HEIGHT, 'H');
-    center_ink(air_label, AIR_TOP, AIR_HEIGHT, 'H');
-    center_ink(hint_label, FOOTER_TOP, 18, 'H');
+    if (text(hint_label, buffer)) center_ink(hint_label, FOOTER_TOP, 18, 'H');
 }
