@@ -53,7 +53,8 @@ static fmo_snapshot_t next_snapshot;
 static char trace[100];
 static void mark(char c) { size_t n=strlen(trace); assert(n+1<sizeof(trace)); trace[n]=c; trace[n+1]=0; }
 static uint64_t monotonic_ms(void) { return clock_ms; }
-static void fmo_network_request_refresh(void) { ++requests; }
+static bool fmo_network_request_stations(uint32_t start) { (void)start; ++requests; return true; }
+static bool fmo_network_switch_station(uint32_t uid) {return uid != 0;}
 static void fmo_network_request_setup(void) { ++setups; }
 static bool fmo_network_get_saved_wifi(fmo_wifi_list_t *list) {
     memset(list,0,sizeof(*list));list->count=2;strcpy(list->names[0],"home");strcpy(list->names[1],"office");return true;
@@ -162,6 +163,17 @@ int main(void) {
     key(BSP_BTN_UP, BSP_BTN_CLICK); assert(s_controls.volume==70 && audio_volume==0);
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.audio_enabled && audio_volume==70);
     key(BSP_BTN_UP, BSP_BTN_LONG); assert(requests==1);
+    assert(s_controls.view==FMO_VIEW_STATIONS && s_controls.stations.status==FMO_STATIONS_LOADING);
+    assert(update_display(clock_ms+600000)); // Browsing keeps the display awake.
+    next_snapshot.state=s_state; next_snapshot.stations.status=FMO_STATIONS_READY;
+    next_snapshot.stations.count=1; next_snapshot.stations.rows[0].uid=43;
+    has_snapshot=true;ui_tick(NULL);
+    key(BSP_BTN_OK,BSP_BTN_CLICK);
+    assert(s_controls.stations.request==FMO_STATION_SWITCH_QUEUED);
+    key(BSP_BTN_OK,BSP_BTN_CLICK);assert(s_controls.stations.request==FMO_STATION_SWITCH_QUEUED);
+    next_snapshot.stations.status=FMO_STATIONS_SUCCESS; has_snapshot=true;ui_tick(NULL);
+    assert(s_controls.view==FMO_VIEW_MONITOR && s_hint_until_ms>clock_ms);
+    assert(s_controls.volume==70 && s_controls.audio_enabled);
     s_state.control_connected=true; s_setup_ssid[0]=0; s_error[0]=0;
     ui_tick(NULL); assert(audio_online);
     // Metadata sockets may recover while /audio continues independently.

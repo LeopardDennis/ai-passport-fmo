@@ -87,7 +87,7 @@ static void apply_input(const app_input_t *input)
         return;
     }
     fmo_key_t key;
-    if (input->event == BSP_BTN_LONG && button == BSP_BTN_UP) key = FMO_KEY_REFRESH;
+    if (input->event == BSP_BTN_LONG && button == BSP_BTN_UP) key = FMO_KEY_STATIONS;
     else if (input->event == BSP_BTN_LONG && button == BSP_BTN_OK) key = FMO_KEY_BACK;
     else if (input->event == BSP_BTN_CLICK) key = button == BSP_BTN_UP ? FMO_KEY_UP :
         button == BSP_BTN_DOWN ? FMO_KEY_DOWN : FMO_KEY_OK;
@@ -97,9 +97,19 @@ static void apply_input(const app_input_t *input)
     case FMO_ACTION_AUDIO:
         fmo_audio_set_volume(s_controls.audio_enabled ? s_controls.volume : 0);
         break;
-    case FMO_ACTION_REFRESH:
-        fmo_network_request_refresh();
-        s_hint_until_ms = monotonic_ms() + 3000;
+    case FMO_ACTION_STATIONS:
+        if (fmo_network_request_stations(s_controls.stations.start)) {
+            s_controls.stations.status = FMO_STATIONS_LOADING;
+            s_controls.stations.request = FMO_STATION_LIST_QUEUED;
+        } else s_controls.stations.status = FMO_STATIONS_LOAD_FAILED;
+        break;
+    case FMO_ACTION_STATION_SWITCH:
+        s_controls.station_already_current = s_state.channel_valid &&
+            s_state.channel_uid == s_controls.stations.rows[s_controls.selection].uid;
+        if (fmo_network_switch_station(s_controls.stations.rows[s_controls.selection].uid)) {
+            s_controls.stations.status = FMO_STATIONS_SWITCHING;
+            s_controls.stations.request = FMO_STATION_SWITCH_QUEUED;
+        }
         break;
     case FMO_ACTION_SETUP: fmo_network_request_setup(); break;
     case FMO_ACTION_RETRY:
@@ -170,6 +180,16 @@ static void ui_tick(lv_timer_t *timer)
         }
         s_state = snapshot.state;
         memcpy(s_controls.connected_ssid, snapshot.connected_ssid, sizeof(s_controls.connected_ssid));
+        bool switched = snapshot.stations.status == FMO_STATIONS_SUCCESS &&
+                        s_controls.stations.status != FMO_STATIONS_SUCCESS;
+        s_controls.stations = snapshot.stations;
+        if (switched) {
+            s_hint_until_ms = monotonic_ms() + 3000;
+            if (s_controls.view == FMO_VIEW_STATIONS) s_controls.view = FMO_VIEW_MONITOR;
+        }
+        if (s_controls.view == FMO_VIEW_STATIONS && s_controls.stations.count &&
+            s_controls.selection >= s_controls.stations.count)
+            s_controls.selection = s_controls.stations.count - 1;
         snprintf(s_setup_ssid, sizeof(s_setup_ssid), "%s", snapshot.setup_ssid);
         snprintf(s_setup_password, sizeof(s_setup_password), "%s", snapshot.setup_password);
         snprintf(s_error, sizeof(s_error), "%s", snapshot.error);

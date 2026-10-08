@@ -20,6 +20,7 @@ idf_component_register(
          "../assets/fonts/fmo_callsign_bold_20.c"
          "../assets/fonts/fmo_callsign_bold_32.c"
          "fmo_controls.c"
+         "fmo_stations.c"
          "fmo_wifi_qr.c"
          "${FMO_COMPACT_FONT}"
          "fmo_monitor_state.c"

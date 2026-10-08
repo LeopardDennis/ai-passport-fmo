@@ -1,4 +1,5 @@
 #include "fmo_network.h"
+#include "fmo_audio.h"
 #include "fmo_provision.h"
 #include "esp_system.h"
 #include <stdatomic.h>
@@ -56,6 +57,7 @@ static uint32_t s_speaker_revision;
 static uint32_t s_query_revision;
 static bool s_clock_initialized, s_clock_online;
 static bool s_query_pending;
+static bool s_station_draining, s_station_prepared;
 static uint64_t s_query_ms;
 static unsigned s_events_stack_min = UINT32_MAX;
 static unsigned s_control_stack_min = UINT32_MAX;
@@ -94,6 +96,7 @@ static void post_update(const fmo_update_t *update)
                  update->connected ? update->text : "");
         if (!update->connected) {
             s_query_pending = false;
+            fmo_stations_disconnect(&s_snapshot.stations);
         }
         break;
     case FMO_UPDATE_EVENTS_LINK:
@@ -104,6 +107,8 @@ static void post_update(const fmo_update_t *update)
     case FMO_UPDATE_CONTROL_LINK:
         fmo_monitor_set_control(state, update->connected && state->wifi_connected);
         s_query_pending = false;
+        if (!update->connected && !s_station_draining)
+            fmo_stations_disconnect(&s_snapshot.stations);
         refresh = update->connected;
         break;
     case FMO_UPDATE_CHANNEL:
@@ -112,6 +117,7 @@ static void post_update(const fmo_update_t *update)
                 (state->channel_valid && state->channel_uid == update->uid)) {
                 fmo_monitor_set_channel(state, update->uid, update->text);
                 state->channel_confirmed_ms = now_ms();
+                fmo_stations_current(&s_snapshot.stations, update->uid);
             } else {
                 // A same-channel confirmation may renew its age across a talker
                 // change without altering speech. Different/unknown channels
@@ -123,7 +129,7 @@ static void post_update(const fmo_update_t *update)
         s_query_pending = false;
         break;
     case FMO_UPDATE_SPEAKER:
-        if (state->wifi_connected && state->events_connected) {
+        if (state->wifi_connected && state->events_connected && !s_snapshot.stations.audio_paused) {
             if (update->speaking) ++s_snapshot.speech_activity;
             if (update->speaking &&
                 (!state->speaking || strcmp(state->speaker, update->callsign) != 0)) {
@@ -137,7 +143,7 @@ static void post_update(const fmo_update_t *update)
         }
         break;
     case FMO_UPDATE_HISTORY:
-        if (state->wifi_connected && state->events_connected)
+        if (state->wifi_connected && state->events_connected && !s_snapshot.stations.audio_paused)
             state->history = update->history;
         break;
     case FMO_UPDATE_ERROR:
@@ -235,6 +241,33 @@ static void parse_fmo_history(const cJSON *data)
     if (update.history.count || !cJSON_GetArraySize(data)) post_update(&update);
 }
 
+/* Range count semantics differ between servers. Request one lookahead row;
+ * retain six and derive the next-page flag from the actual array length. */
+static void parse_station_list(const cJSON *data)
+{
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(data, "list");
+    unsigned count = cJSON_IsArray(list) ? (unsigned)cJSON_GetArraySize(list) : UINT32_MAX;
+    fmo_station_t rows[FMO_STATION_PAGE_SIZE + 1] = {0};
+    bool valid = count <= FMO_STATION_PAGE_SIZE + 1;
+    for (unsigned i = 0; valid && i < count; ++i) {
+        const cJSON *row = cJSON_GetArrayItem(list, (int)i);
+        const cJSON *uid = cJSON_GetObjectItemCaseSensitive(row, "uid");
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(row, "name");
+        valid = cJSON_IsNumber(uid) && uid->valuedouble > 0 &&
+                uid->valuedouble <= UINT32_MAX &&
+                uid->valuedouble == (uint32_t)uid->valuedouble && cJSON_IsString(name);
+        if (!valid) break;
+        rows[i].uid = (uint32_t)uid->valuedouble;
+        fmo_text_copy_utf8(rows[i].name, sizeof(rows[i].name), name->valuestring);
+        for (unsigned j = 0; j < i; ++j) if (rows[j].uid == rows[i].uid) valid = false;
+    }
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    fmo_stations_list(&s_snapshot.stations, valid ? rows : NULL, count);
+    xQueueOverwrite(s_update_queue, &s_snapshot);
+    xSemaphoreGive(s_state_lock);
+    fmo_network_request_refresh();
+}
+
 static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
 {
     cJSON *root = cJSON_ParseWithOpts(payload, NULL, true);
@@ -271,6 +304,20 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
             invalidate_live_message();
         cJSON_Delete(root);
         return;
+    }
+
+    if (kind == FMO_SOCKET_CONTROL && !strcmp(type->valuestring, "station")) {
+        if (!strcmp(sub_type->valuestring, "getListResponse")) parse_station_list(data);
+        else if (!strcmp(sub_type->valuestring, "setCurrentResponse")) {
+            const cJSON *result = cJSON_GetObjectItemCaseSensitive(data, "result");
+            if (cJSON_IsNumber(result) && result->valuedouble == result->valueint) {
+                xSemaphoreTake(s_state_lock, portMAX_DELAY);
+                fmo_stations_ack(&s_snapshot.stations, result->valueint == 0);
+                xQueueOverwrite(s_update_queue, &s_snapshot);
+                xSemaphoreGive(s_state_lock);
+                fmo_network_request_refresh();
+            }
+        }
     }
 
     if (kind == FMO_SOCKET_EVENTS && strcmp(type->valuestring, "qso") == 0 &&
@@ -391,6 +438,51 @@ static bool request_current_channel(void)
         return true; // A partially sent query also has ambiguous reply ownership.
     }
     return false;
+}
+
+/* /ws has no request IDs. List/set transactions own it exclusively;
+ * channel polling resumes only after their reply or a drained connection. */
+static bool request_station_control(void)
+{
+    char request[128];
+    int length = 0;
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    fmo_stations_t *stations = &s_snapshot.stations;
+    fmo_station_request_t phase = stations->request;
+    if (phase == FMO_STATION_NONE || phase == FMO_STATION_VERIFY ||
+        phase == FMO_STATION_RECONCILE ||
+        (phase == FMO_STATION_LIST_QUEUED && s_query_pending)) {
+        xSemaphoreGive(s_state_lock);
+        return request_current_channel();
+    }
+    if (!s_snapshot.state.control_connected || !s_control_socket.client ||
+        !esp_websocket_client_is_connected(s_control_socket.client)) {
+        xSemaphoreGive(s_state_lock);
+        return false;
+    }
+    if (phase == FMO_STATION_LIST_QUEUED) {
+        length = snprintf(request, sizeof(request),
+            "{\"type\":\"station\",\"subType\":\"getListRange\",\"data\":{\"start\":%lu,\"count\":7}}",
+            (unsigned long)stations->start);
+        stations->request = FMO_STATION_LIST_WAIT;
+    } else if (phase == FMO_STATION_SWITCH_QUEUED && s_station_prepared && fmo_audio_is_suspended()) {
+        length = snprintf(request, sizeof(request),
+            "{\"type\":\"station\",\"subType\":\"setCurrent\",\"data\":{\"uid\":%lu}}",
+            (unsigned long)stations->target_uid);
+        stations->request = FMO_STATION_SET_WAIT;
+    }
+    if (length) stations->started_ms = now_ms();
+    xSemaphoreGive(s_state_lock);
+    if (!length) return false;
+    int sent = esp_websocket_client_send_text(s_control_socket.client, request,
+                    length, pdMS_TO_TICKS(FMO_LINK_IO_TIMEOUT_MS));
+    if (sent == length) return false;
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    // Even a partial set may have taken effect. Reconcile; never resend it.
+    fmo_stations_disconnect(&s_snapshot.stations);
+    xQueueOverwrite(s_update_queue, &s_snapshot);
+    xSemaphoreGive(s_state_lock);
+    return true;
 }
 
 /* The coordinator owns one lifetime SNTP service. No wait for synchronization:
@@ -619,6 +711,39 @@ static void stop_socket(fmo_socket_t *socket)
 }
 
 static bool switch_saved_wifi(void);
+/* Quarantine event metadata until the actual station is confirmed. Stop joins
+ * old callbacks before setCurrent; no previous-station history can leak back. */
+static bool prepare_station_work(void)
+{
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    bool expired = fmo_stations_expire(&s_snapshot.stations, now_ms());
+    bool prepare = s_snapshot.stations.request == FMO_STATION_SWITCH_QUEUED && !s_station_prepared;
+    bool paused = s_snapshot.stations.audio_paused;
+    if (s_snapshot.stations.request != FMO_STATION_SWITCH_QUEUED) s_station_prepared = false;
+    if (prepare || expired) {
+        s_station_draining = true;
+        s_query_pending = false;
+        fmo_monitor_set_control(&s_snapshot.state, false);
+        if (prepare) {
+            fmo_monitor_set_events(&s_snapshot.state, false);
+            s_snapshot.state.last_speaker[0] = '\0';
+            s_snapshot.state.grid[0] = '\0';
+            ++s_speaker_revision;
+        }
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+    }
+    xSemaphoreGive(s_state_lock);
+    fmo_audio_suspend(paused);
+    if (paused) stop_socket(&s_events_socket);
+    if (prepare || expired) {
+        stop_socket(&s_control_socket);
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        s_station_draining = false;
+        s_station_prepared = prepare;
+        xSemaphoreGive(s_state_lock);
+    }
+    return paused;
+}
 
 static void clear_dns_cache(void *unused)
 {
@@ -767,6 +892,7 @@ static void network_task(void *argument)
     for (;;) {
         check_setup_request();
         if (!switch_saved_wifi()) { cleanup_wifi(); prepare_network(); }
+        bool stations_paused = prepare_station_work();
         EventBits_t old_bits = xEventGroupClearBits(s_wifi_bits, FMO_WIFI_DISCONNECTED_BIT);
         if (!(old_bits & FMO_WIFI_READY_BIT) || (old_bits & FMO_WIFI_DISCONNECTED_BIT)) {
             update_clock_service(false);
@@ -778,7 +904,7 @@ static void network_task(void *argument)
         retry_wifi();
         if (xEventGroupGetBits(s_wifi_bits) & FMO_WIFI_READY_BIT) {
             update_clock_service(true);
-            if (!s_events_socket.client) {
+            if (!stations_paused && !s_events_socket.client) {
                 err = start_socket(&s_events_socket, events_uri);
                 if (err != ESP_OK) ESP_LOGW(TAG, "Events client creation failed; retrying");
             }
@@ -786,8 +912,10 @@ static void network_task(void *argument)
                 err = start_socket(&s_control_socket, control_uri);
                 if (err != ESP_OK) ESP_LOGW(TAG, "Control client creation failed; retrying");
             }
-            if (request_current_channel())
+            if (request_station_control()) {
+                post_link(FMO_UPDATE_CONTROL_LINK, false);
                 stop_socket(&s_control_socket);
+            }
         }
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
         expire_channel();
@@ -872,4 +1000,32 @@ void fmo_network_cancel_setup(void)
 {
     if (s_wifi_bits && atomic_load(&s_setup_active))
         xEventGroupSetBits(s_wifi_bits, FMO_WIFI_CANCEL_BIT);
+}
+
+bool fmo_network_request_stations(uint32_t start)
+{
+    if (!s_network_task || !s_state_lock || xSemaphoreTake(s_state_lock, 0) != pdTRUE) return false;
+    bool accepted = s_snapshot.state.wifi_connected && s_snapshot.state.control_connected &&
+                    fmo_stations_load(&s_snapshot.stations, start, now_ms());
+    if (!accepted && s_snapshot.stations.request == FMO_STATION_NONE) {
+        s_snapshot.stations.status = FMO_STATIONS_LOAD_FAILED;
+        s_snapshot.stations.start = start;
+        s_snapshot.stations.count = 0;
+    }
+    xQueueOverwrite(s_update_queue, &s_snapshot);
+    xSemaphoreGive(s_state_lock);
+    if (accepted) fmo_network_request_refresh();
+    return accepted;
+}
+
+bool fmo_network_switch_station(uint32_t uid)
+{
+    if (!s_network_task || !s_state_lock || xSemaphoreTake(s_state_lock, 0) != pdTRUE) return false;
+    bool accepted = s_snapshot.state.wifi_connected && s_snapshot.state.control_connected &&
+        fmo_stations_switch(&s_snapshot.stations, uid,
+            s_snapshot.state.channel_valid ? s_snapshot.state.channel_uid : 0, now_ms());
+    xQueueOverwrite(s_update_queue, &s_snapshot);
+    xSemaphoreGive(s_state_lock);
+    if (accepted) fmo_network_request_refresh();
+    return accepted;
 }

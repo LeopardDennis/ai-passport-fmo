@@ -33,11 +33,12 @@ def run():
     header = (ROOT / "main/fmo_network.h").read_text()
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
-        "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "expire_channel", "cleanup_wifi", "prepare_network", "post_link"))
+        "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_station_list", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link"))
     functions += "\n" + source[source.index("void fmo_network_request_retry(void)"):source.index("bool fmo_network_get_saved_wifi(")]
     preamble = r'''
 #include "fmo_monitor_state.h"
 #include "fmo_wifi_profiles.h"
+#include "fmo_stations.h"
 #include "fmo_text.h"
 #include "fmo_link_policy.h"
 #include "fmo_ws_rx.h"
@@ -63,6 +64,7 @@ typedef struct {
 static fmo_snapshot_t s_snapshot, published;
 static int s_state_lock, s_update_queue, locked, refreshes;
 static bool s_query_pending;
+static bool s_station_draining, s_station_prepared;
 static uint32_t s_speaker_revision, s_query_revision;
 static uint64_t clock_ms = 10000, s_query_ms;
 static bool s_clock_initialized, s_clock_online;
@@ -81,6 +83,10 @@ static int esp_netif_sntp_init(const esp_sntp_config_t *config) {
 }
 static int esp_netif_sntp_start(void) { ++clock_restarts;return clock_fail ? -1 : ESP_OK; }
 static fmo_socket_t s_control_socket = {.kind=FMO_SOCKET_CONTROL, .client=1};
+static fmo_socket_t s_events_socket = {.kind=FMO_SOCKET_EVENTS, .client=2};
+static bool audio_suspended, audio_ack;
+static void fmo_audio_suspend(bool value) { audio_suspended=value; }
+static bool fmo_audio_is_suspended(void) { return audio_suspended && audio_ack; }
 static int sends, short_send;
 static char last_request[128];
 static int esp_websocket_client_is_connected(int client) { return client; }
@@ -115,6 +121,13 @@ static int esp_wifi_deinit(void){assert(s_wifi_initialized);++cleanups;return 0;
 static void esp_netif_destroy_default_wifi(int *station){assert(station==&station_handle);++destroyed;}
 static void xEventGroupClearBits(int bits,int mask){(void)bits;assert(mask==15);}
 static void post_link(fmo_update_type_t type, bool connected);
+static unsigned socket_stops;
+static void stop_socket(fmo_socket_t *socket) {
+    assert(!locked);
+    if (!socket->client) return;
+    ++socket_stops; socket->client=0;
+    post_link(socket->kind==FMO_SOCKET_EVENTS ? FMO_UPDATE_EVENTS_LINK : FMO_UPDATE_CONTROL_LINK,false);
+}
 static char last_error[48];
 static int fmo_storage_prepare(void) {
     ++storage_attempts;
@@ -498,6 +511,88 @@ int main(void) {
     // Failed initialization before Wi-Fi init still releases the STA netif.
     s_wifi_initialized=false;s_wifi_handler=s_ip_handler=NULL;s_station=&station_handle;
     cleanup_wifi();assert(unregistered==2 && destroyed==2 && cleanups==1 && !s_station);
+
+    // Real parser + coordinator: page lookahead, request ownership, audio barrier,
+    // metadata quarantine, confirmation, timeout and ambiguous-send recovery.
+    memset(&s_snapshot,0,sizeof(s_snapshot)); short_send=0; s_query_pending=false;
+    s_control_socket.client=1; s_events_socket.client=2;
+    post_link(FMO_UPDATE_WIFI,true); post_link(FMO_UPDATE_EVENTS_LINK,true);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query(); parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    assert(fmo_stations_load(&s_snapshot.stations,0,clock_ms));
+    query(); int before_list=sends;
+    assert(!request_station_control() && sends==before_list);
+    parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    assert(!request_station_control() && sends==before_list+1);
+    assert(strstr(last_request,"getListRange") && strstr(last_request,"\"count\":7"));
+    const char *list="{\"type\":\"station\",\"subType\":\"getListResponse\",\"data\":{\"count\":100,\"list\":["
+        "{\"uid\":42,\"name\":\"安吉\"},{\"uid\":43,\"name\":\"上海\"},"
+        "{\"uid\":44,\"name\":\"杭州\"},{\"uid\":45,\"name\":\"北京\"},"
+        "{\"uid\":46,\"name\":\"深圳\"},{\"uid\":47,\"name\":\"测试\"},{\"uid\":48,\"name\":\"下页\"}]}}";
+    parse_fmo_message(FMO_SOCKET_EVENTS,list); assert(!s_snapshot.stations.count);
+    parse_fmo_message(FMO_SOCKET_CONTROL,list);
+    assert(s_snapshot.stations.count==6 && s_snapshot.stations.has_next);
+    assert(!strcmp(s_snapshot.stations.rows[1].name,"上海"));
+    assert(!prepare_station_work() && !audio_suspended && !socket_stops);
+    parse_fmo_message(FMO_SOCKET_EVENTS,START);
+    s_snapshot.state.history.count=1;
+    assert(fmo_stations_switch(&s_snapshot.stations,43,42,clock_ms));
+    query(); assert(prepare_station_work());
+    assert(socket_stops==2 && audio_suspended && !s_query_pending);
+    assert(!s_snapshot.state.speaking && !s_snapshot.state.history.count);
+    assert(!s_snapshot.state.last_speaker[0] && !s_snapshot.state.grid[0]);
+    parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL43);
+    assert(s_snapshot.stations.request==FMO_STATION_SWITCH_QUEUED);
+    s_control_socket.client=1;post_link(FMO_UPDATE_CONTROL_LINK,true);
+    int before_set=sends;
+    assert(!request_station_control() && sends==before_set); // Audio worker has not joined yet.
+    audio_ack=true;
+    assert(!request_station_control() && sends==before_set+1);
+    assert(strstr(last_request,"setCurrent") && strstr(last_request,"43"));
+    assert(!request_station_control() && sends==before_set+1); // Never duplicate the command.
+    parse_fmo_message(FMO_SOCKET_EVENTS,START); assert(!s_snapshot.state.speaking);
+    parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"station\",\"subType\":\"setCurrentResponse\",\"data\":{\"result\":0}}");
+    assert(s_snapshot.stations.audio_paused && s_snapshot.stations.status==FMO_STATIONS_SWITCHING);
+    assert(!request_station_control());parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    assert(s_snapshot.stations.audio_paused); // Ack and old UID are not success.
+    assert(!request_station_control());parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL43);
+    assert(s_snapshot.stations.status==FMO_STATIONS_SUCCESS);
+    assert(!prepare_station_work() && !audio_suspended);
+
+    // Timeout drains any old query owner; a late reply cannot release audio.
+    assert(fmo_stations_switch(&s_snapshot.stations,42,43,clock_ms));
+    assert(prepare_station_work());s_control_socket.client=1;post_link(FMO_UPDATE_CONTROL_LINK,true);
+    assert(!request_station_control());assert(s_snapshot.stations.request==FMO_STATION_SET_WAIT);
+    clock_ms+=FMO_STATION_TIMEOUT_MS;
+    assert(prepare_station_work() && !s_control_socket.client);
+    assert(s_snapshot.stations.status==FMO_STATIONS_UNKNOWN);
+    parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);assert(s_snapshot.stations.audio_paused);
+    s_control_socket.client=1;post_link(FMO_UPDATE_CONTROL_LINK,true);
+    assert(!request_station_control() && strstr(last_request,"getCurrent"));
+    parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL43);
+    assert(!s_snapshot.stations.audio_paused && s_snapshot.stations.status==FMO_STATIONS_UNKNOWN);
+    prepare_station_work();
+
+    // Partial set writes are ambiguous; reconcile once connected, never retry set.
+    assert(fmo_stations_switch(&s_snapshot.stations,42,43,clock_ms));
+    assert(prepare_station_work());s_control_socket.client=1;post_link(FMO_UPDATE_CONTROL_LINK,true);
+    short_send=1;assert(request_station_control());short_send=0;
+    assert(s_snapshot.stations.request==FMO_STATION_RECONCILE);
+    post_link(FMO_UPDATE_CONTROL_LINK,false);stop_socket(&s_control_socket);
+    s_control_socket.client=1;post_link(FMO_UPDATE_CONTROL_LINK,true);
+    assert(!request_station_control() && strstr(last_request,"getCurrent"));
+    parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    assert(s_snapshot.stations.status==FMO_STATIONS_SUCCESS && !prepare_station_work());
+
+    assert(fmo_stations_load(&s_snapshot.stations,6,clock_ms));
+    assert(!request_station_control());
+    parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"station\",\"subType\":\"getListResponse\",\"data\":{\"list\":[{\"uid\":1.5,\"name\":\"bad\"}]}}");
+    assert(s_snapshot.stations.status==FMO_STATIONS_LOAD_FAILED && !s_snapshot.stations.count);
+    assert(fmo_stations_load(&s_snapshot.stations,6,clock_ms));
+    assert(!request_station_control());clock_ms+=FMO_STATION_TIMEOUT_MS;
+    assert(!prepare_station_work() && !s_control_socket.client);
+    parse_fmo_message(FMO_SOCKET_CONTROL,list);
+    assert(s_snapshot.stations.status==FMO_STATIONS_LOAD_FAILED && !s_snapshot.stations.count);
     puts("FMO network parser: PASS (cross-server flags/color lifecycle, recent-three history/sorting/isolation, large history receive/fragmentation, local profile exclusion, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");
 }
 '''
@@ -507,7 +602,7 @@ int main(void) {
         binary = Path(tmp) / "network"
         subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                         "-I" + str(ROOT / "main"), "-I" + str(cjson), str(file),
-                        str(cjson / "cJSON.c"), str(ROOT / "main/fmo_monitor_state.c"),
+                        str(cjson / "cJSON.c"), str(ROOT / "main/fmo_monitor_state.c"), str(ROOT / "main/fmo_stations.c"),
                         str(ROOT / "main/fmo_text.c"), str(ROOT / "main/fmo_ws_rx.c"), "-lm", "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
 

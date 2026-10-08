@@ -93,7 +93,7 @@ logs report connection changes and aggregate received bytes, discarded samples
 and invalid messages, committed/pending samples, output/source samples and
 maximum codec-write duration and buffer-wait time every 30 seconds, without conversation content.
 Audio continues while the LCD sleeps. No microphone capture, recording or
-transmit/PTT commands are added. The footer uses one centered row with the audio percentage and the long-OK setup hint. It displays the selected volume while audio is enabled and 0% while muted; clicking OK toggles sound and holding OK opens the setup/network menu.
+transmit/PTT commands are added. The footer uses one centered row with the audio percentage and the long-UP station-list hint. It displays the selected volume while audio is enabled and 0% while muted; clicking OK toggles sound and holding OK opens the setup/network menu.
 With no active speech, the middle shows the last-heard callsign in bold white;
 before the first contact it shows `--` and a waiting-for-speech hint.
 Runtime sound settings reset on reboot; `CONFIG_FMO_VOLUME` sets initial volume.
@@ -229,9 +229,30 @@ and cannot reliably identify a reinstall of the same binary.
 - **UP**: increase conversation volume by 10%, up to 100%.
 - **DOWN**: decrease conversation volume by 10%, down to 0%.
 - **OK**: toggle audio on/off while preserving the selected volume.
-- **Long UP**: refresh the current FMO channel immediately (the five-second boot Recovery hook is unchanged).
+- **Long UP**: open the station list (the five-second boot Recovery hook is unchanged).
 - **Long OK**: open the network menu; UP/DOWN selects, click OK executes, long OK returns.
 - **Setup click OK**: switch QR/credentials; UP/DOWN or long OK cancels to the network menu.
+
+The station list uses the existing font, palette and single-line gray footer.
+UP/DOWN selects among six rows and loads the adjacent page at the boundary;
+the current station appears in the summary and has an asterisk in the list.
+The range indicator includes `+` when another page is available. Selected long
+names scroll; matching names on a page include their UIDs. Click OK to switch
+immediately, without a confirmation page. Selecting the current station only
+returns to monitoring with a hint. Long OK returns without cancelling a sent
+command. Browsing preserves playback and background channel polling.
+
+A switch waits for the audio worker to mute and close its old stream, clears old
+speech/grid/history, and restarts reception after the actual UID is confirmed.
+Volume and mute preferences are preserved. Repeated OK presses cannot submit a
+second command. Failed/empty lists support OK to reload; on an uncertain send,
+disconnection or a ten-second response timeout, the firmware queries the actual
+station without resending the switch. Audio remains paused while that result is
+unresolved; long OK still returns so network setup remains accessible. There are
+only six cached rows plus one transient lookahead row. This requires compatible
+FMO `getListRange`, `setCurrent` and `getCurrent` station APIs; physical switching,
+continuity and memory/stack margins under live traffic require device validation.
+
 
 ## Idle display and wake-up
 

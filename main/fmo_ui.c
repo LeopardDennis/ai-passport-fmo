@@ -172,6 +172,26 @@ static void draw_wifi_rows(lv_event_t *event)
         lv_draw_rect(lv_event_get_layer(event), &dsc, &area);
     }
 }
+static lv_obj_t *station_status, *station_page, *station_footer;
+static lv_obj_t *station_names[FMO_STATION_PAGE_SIZE];
+static unsigned station_draw_count, station_draw_selection;
+
+/* Six fixed row backgrounds share the overlay draw pass. Avoid six container
+ * objects so list/QR/monitor transitions keep the existing 24 KiB pool budget. */
+static void draw_station_rows(lv_event_t *event)
+{
+    lv_area_t panel;
+    lv_obj_get_coords(lv_event_get_target(event), &panel);
+    for (unsigned i = 0; i < station_draw_count; ++i) {
+        lv_area_t area = {.x1 = panel.x1 + 12, .x2 = panel.x1 + 227,
+            .y1 = panel.y1 + 64 + 28 * i, .y2 = panel.y1 + 89 + 28 * i};
+        lv_draw_rect_dsc_t dsc;
+        lv_draw_rect_dsc_init(&dsc);
+        dsc.bg_color = lv_color_hex(i == station_draw_selection ? ORANGE : LINE);
+        dsc.bg_opa = LV_OPA_COVER;
+        lv_draw_rect(lv_event_get_layer(event), &dsc, &area);
+    }
+}
 static fmo_view_t overlay_view = FMO_VIEW_MONITOR;
 static bool overlay_info;
 static char overlay_ssid[33], overlay_password[17];
@@ -205,7 +225,24 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
         lv_draw_buf_t *qr_buffer = view == FMO_VIEW_SETUP && !controls->setup_info ?
             lv_draw_buf_create(128, 128, LV_COLOR_FORMAT_I1, LV_STRIDE_AUTO) : NULL;
         overlay = rect(lv_screen_active(), 0, 40, 240, 280, BLACK);
-        if (view == FMO_VIEW_NETWORK) {
+        if (view == FMO_VIEW_STATIONS) {
+            lv_obj_t *title = label(overlay, 12, 10, 140, &fmo_channel_font, ORANGE, "台站列表");
+            center_ink(title, 10, 20, 'H');
+            station_page = label(overlay, 160, 10, 68, &lv_font_montserrat_14, MUTED, "");
+            lv_obj_set_style_text_align(station_page, LV_TEXT_ALIGN_RIGHT, 0);
+            center_ink(station_page, 10, 20, 'H');
+            station_status = label(overlay, 12, 38, 216, &fmo_channel_font, MUTED, "");
+            lv_obj_set_height(station_status, fmo_channel_font.line_height);
+            station_draw_count = 0;
+            station_draw_selection = UINT32_MAX;
+            lv_obj_add_event_cb(overlay, draw_station_rows, LV_EVENT_DRAW_MAIN, NULL);
+            for (unsigned i = 0; i < FMO_STATION_PAGE_SIZE; ++i) {
+                station_names[i] = label(overlay, 20, 64 + 28 * i, 200, &fmo_channel_font, WHITE, "");
+                lv_obj_set_height(station_names[i], fmo_channel_font.line_height);
+            }
+            station_footer = label(overlay, 12, FOOTER_TOP - 40, 216, &fmo_channel_font, MUTED, "");
+            lv_obj_set_style_text_align(station_footer, LV_TEXT_ALIGN_CENTER, 0);
+        } else if (view == FMO_VIEW_NETWORK) {
             label(overlay, 12, 10, 216, &fmo_channel_font, ORANGE, "网络设置");
             menu_status = label(overlay, 12, 52, 216, &fmo_channel_font, MUTED, "");
             const char *items[] = {"Wi-Fi 配网", "重连 Wi-Fi", "返回"};
@@ -320,6 +357,64 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
             color(menu_labels[i], i == controls->selection ? BLACK : WHITE);
         }
     }
+}
+
+static void render_stations(const fmo_controls_t *controls, const fmo_monitor_state_t *state)
+{
+    const fmo_stations_t *s = &controls->stations;
+    char buffer[80];
+    if (s->count) snprintf(buffer, sizeof(buffer), "%lu-%lu%s",
+        (unsigned long)s->start + 1, (unsigned long)s->start + s->count, s->has_next ? "+" : "");
+    else buffer[0] = '\0';
+    if (text(station_page, buffer)) center_ink(station_page, 10, 20, 'H');
+    const char *status = NULL;
+    switch (s->status) {
+    case FMO_STATIONS_IDLE:
+    case FMO_STATIONS_LOADING: status = "正在读取台站"; break;
+    case FMO_STATIONS_LOAD_FAILED:
+        status = !state->wifi_connected ? "Wi-Fi未连接 OK重试" :
+            !state->control_connected ? "FMO未连接 OK重试" : "读取失败 OK重试";
+        break;
+    case FMO_STATIONS_EMPTY: status = "暂无台站 OK重试"; break;
+    case FMO_STATIONS_SWITCHING: status = "正在切换台站"; break;
+    case FMO_STATIONS_FAILED: status = s->audio_paused ? "切换失败 正在确认" : "切换失败 OK重试"; break;
+    case FMO_STATIONS_UNKNOWN: status = s->audio_paused ? "结果待确认 请稍候" : "未确认切换 OK重试"; break;
+    default: break;
+    }
+    if (!status) {
+        if (state->channel_valid) snprintf(buffer, sizeof(buffer), "当前: %s", state->channel_name);
+        else snprintf(buffer, sizeof(buffer), "正在确认当前台站");
+        status = buffer;
+    }
+    if (text(station_status, status)) center_ink(station_status, 36, 20, 'H');
+    color(station_status, s->status == FMO_STATIONS_FAILED ||
+        s->status == FMO_STATIONS_LOAD_FAILED ? RED : MUTED);
+    unsigned count = s->status == FMO_STATIONS_LOADING ? 0 : s->count;
+    if (count != station_draw_count || controls->selection != station_draw_selection) {
+        station_draw_count = count;
+        station_draw_selection = controls->selection;
+        lv_obj_invalidate(overlay);
+    }
+    for (unsigned i = 0; i < FMO_STATION_PAGE_SIZE; ++i) {
+        bool present = i < s->count && s->status != FMO_STATIONS_LOADING;
+        if (!present) { lv_obj_add_flag(station_names[i], LV_OBJ_FLAG_HIDDEN); continue; }
+        lv_obj_remove_flag(station_names[i], LV_OBJ_FLAG_HIDDEN);
+        bool selected = i == controls->selection;
+        color(station_names[i], selected ? BLACK : WHITE);
+        const fmo_station_t *row = &s->rows[i];
+        const char *mark = state->channel_valid && row->uid == state->channel_uid ? "* " : "";
+        bool duplicate = false;
+        for (unsigned j = 0; j < s->count; ++j)
+            if (i != j && !strcmp(row->name, s->rows[j].name)) duplicate = true;
+        if (duplicate) snprintf(buffer, sizeof(buffer), "%s#%lu %s", mark, (unsigned long)row->uid, row->name);
+        else if (row->name[0]) snprintf(buffer, sizeof(buffer), "%s%s", mark, row->name);
+        else snprintf(buffer, sizeof(buffer), "%s台站 #%lu", mark, (unsigned long)row->uid);
+        lv_label_long_mode_t mode = selected ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT;
+        if (lv_label_get_long_mode(station_names[i]) != mode) lv_label_set_long_mode(station_names[i], mode);
+        if (text(station_names[i], buffer)) center_ink(station_names[i], 64 + 28 * i, 26, 'H');
+    }
+    const char *footer = s->audio_paused ? "切换期间暂停音频" : "上下选择 OK切换 长按OK返回";
+    if (text(station_footer, footer)) center_ink(station_footer, FOOTER_TOP - 40, 18, 'H');
 }
 
 void fmo_ui_create(void)
@@ -493,7 +588,7 @@ static void create_monitor(void)
     fmo_audio_meter_reset(&audio_meter);
     audio_meter_enabled = false;
     hint_label = label(screen, 12, FOOTER_TOP, 216, &fmo_channel_font, MUTED,
-                       "音频: 50%  长按OK: 配网");
+                       "音频: 50%  长按上: 台站");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, 0);
     center_ink(hint_label, FOOTER_TOP, 18, 'H');
 }
@@ -507,13 +602,13 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     // Live speech belongs to /events; channel confirmation belongs to /ws.
     // Keep receiving speech visible while channel metadata recovers, but never
     // present the cached channel name as confirmed until a fresh reply arrives.
-    bool live = !setup && !error[0] && s->wifi_connected && s->events_connected;
+    bool live = !controls->stations.audio_paused && !setup && !error[0] && s->wifi_connected && s->events_connected;
     bool channel_ready = live && s->control_connected && s->channel_valid;
     bool speaking = live && s->speaking;
-    const char *link = setup ? "手机配网" : error[0] ? "网络连接异常" :
+    const char *link = controls->stations.audio_paused ? "正在确认台站" : setup ? "手机配网" : error[0] ? "网络连接异常" :
         !s->wifi_connected ? "正在连接 Wi-Fi" :
         !s->events_connected ? "正在连接 FMO" : !channel_ready ? "频道确认中" :
-        sync_hint ? "FMO 已连接 已请求刷新" : "FMO 已连接";
+        sync_hint ? (controls->station_already_current ? "已是当前台站" : "已切换到新台站") : "FMO 已连接";
 
     int soc = battery >= 0 && battery <= 100 ? battery : -1;
     if (soc != last_battery) {
@@ -529,8 +624,9 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     }
     overlay_render(controls, s->wifi_connected, setup_ssid, setup_password);
     audio_meter_enabled = controls->view == FMO_VIEW_MONITOR && !setup && !error[0] &&
-                          s->wifi_connected && controls->audio_enabled && controls->volume > 0;
+                          s->wifi_connected && !controls->stations.audio_paused && controls->audio_enabled && controls->volume > 0;
     if (!audio_meter_enabled) fmo_ui_set_audio_level(0, now_ms);
+    if (controls->view == FMO_VIEW_STATIONS) render_stations(controls, s);
     if (controls->view != FMO_VIEW_MONITOR) return;
     if (text(link_label, link)) center_ink(link_label, LINK_TOP, LINK_HEIGHT, 'H');
     color(link_label, error[0] ? RED : channel_ready ? WHITE : ORANGE);
@@ -617,10 +713,12 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         }
         color(qso_labels[i], present ? WHITE : MUTED);
     }
-    if (setup) {
+    if (controls->stations.audio_paused) {
+        snprintf(buffer, sizeof(buffer), "切换期间暂停音频");
+    } else if (setup) {
         snprintf(buffer, sizeof(buffer), "浏览器: 192.168.9.1");
     } else {
-        snprintf(buffer, sizeof(buffer), "音频: %u%%  长按OK: 配网",
+        snprintf(buffer, sizeof(buffer), "音频: %u%%  长按上: 台站",
                  controls->audio_enabled ? controls->volume : 0);
     }
     if (text(hint_label, buffer)) center_ink(hint_label, FOOTER_TOP, 18, 'H');

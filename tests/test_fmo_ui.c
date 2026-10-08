@@ -2,6 +2,7 @@
 #include "fmo_ui.h"
 #include "fmo_wifi_font.h"
 #include "src/widgets/label/lv_label_private.h"
+#include "fmo_text.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -242,7 +243,7 @@ int main(int argc, char **argv)
     fmo_monitor_set_channel(&state, 42, "安吉FMO中继");
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     assert(find_text(lv_screen_active(), "正在通联"));
-    assert(find_text(lv_screen_active(), "音频: 50%  长按OK: 配网"));
+    assert(find_text(lv_screen_active(), "音频: 50%  长按上: 台站"));
     lv_refr_now(display);
     flushes = 0;
     for (unsigned i = 0; i < 120; ++i) {
@@ -294,7 +295,7 @@ int main(int argc, char **argv)
     assert(audio_bar_width(display) == 108);
     controls.audio_enabled=false;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
-    assert(find_text(lv_screen_active(), "音频: 0%  长按OK: 配网"));
+    assert(find_text(lv_screen_active(), "音频: 0%  长按上: 台站"));
     fmo_ui_set_audio_level(100, 12780);
     assert(audio_bar_width(display) == 0);
     controls.audio_enabled=true; controls.volume=0;
@@ -303,14 +304,14 @@ int main(int argc, char **argv)
     assert(audio_bar_width(display) == 0);
     controls.volume=100; controls.audio_enabled=true;
     fmo_ui_render(&state,"","","",82,12000,true,&controls);
-    assert(find_text(lv_screen_active(), "音频: 100%  长按OK: 配网"));
-    lv_obj_t *refresh_link = find_text(lv_screen_active(), "FMO 已连接 已请求刷新");
-    assert(refresh_link);
+    assert(find_text(lv_screen_active(), "音频: 100%  长按上: 台站"));
+    lv_obj_t *switch_link = find_text(lv_screen_active(), "已切换到新台站");
+    assert(switch_link);
     lv_point_t hint_size;
-    lv_text_get_size(&hint_size, "音频: 100%  长按OK: 配网", &fmo_channel_font,
+    lv_text_get_size(&hint_size, "音频: 100%  长按上: 台站", &fmo_channel_font,
                      0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     assert(hint_size.x <= 216);
-    lv_text_get_size(&hint_size, lv_label_get_text(refresh_link), &fmo_channel_font,
+    lv_text_get_size(&hint_size, lv_label_get_text(switch_link), &fmo_channel_font,
                      0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     assert(hint_size.x <= 216);
     controls.volume=50;
@@ -498,6 +499,35 @@ int main(int argc, char **argv)
         fmo_controls_key(&controls, FMO_KEY_OK);
         controls.setup_info = !strcmp(argv[1], "setup_info");
     }
+    if (argc > 1 && !strncmp(argv[1], "stations", 8)) {
+        controls.view = FMO_VIEW_STATIONS;
+        controls.selection = 1;
+        controls.stations.count = 6;
+        controls.stations.has_next = true;
+        controls.stations.status = FMO_STATIONS_READY;
+        const char *names[] = {"安吉FMO中继", "上海业余无线电", "杭州台站", "北京台站", "深圳台站", "全国通联测试台站"};
+        for (unsigned i=0;i<6;++i) {
+            controls.stations.rows[i].uid=42+i;
+            snprintf(controls.stations.rows[i].name,48,"%s",names[i]);
+        }
+        if (!strcmp(argv[1],"stations_long")) {
+            fmo_text_copy_utf8(controls.stations.rows[1].name, sizeof(controls.stations.rows[1].name),"全国业余无线电通联测试超长台站名称");
+            controls.stations.start=6;
+        }
+        if (!strcmp(argv[1],"stations_switch")) {
+            controls.stations.status=FMO_STATIONS_SWITCHING;
+            controls.stations.audio_paused=true;
+        }
+        if (!strcmp(argv[1],"stations_error")) controls.stations.status=FMO_STATIONS_LOAD_FAILED;
+        if (!strcmp(argv[1],"stations_loading")) {
+            controls.stations.status=FMO_STATIONS_LOADING;
+            controls.stations.count=0;
+        }
+        if (!strcmp(argv[1],"stations_unknown")) {
+            controls.stations.status=FMO_STATIONS_UNKNOWN;
+            controls.stations.audio_paused=true;
+        }
+    }
     if (argc > 1 && (!strcmp(argv[1], "network") || !strcmp(argv[1], "network_retry") ||
                      !strcmp(argv[1], "network_back"))) {
         controls.view = FMO_VIEW_NETWORK;
@@ -614,7 +644,7 @@ int main(int argc, char **argv)
     }
     if (controls.view == FMO_VIEW_MONITOR && !ssid[0]) {
         char footer[80];
-        snprintf(footer,sizeof(footer),"音频: %u%%  长按OK: 配网",
+        snprintf(footer,sizeof(footer),"音频: %u%%  长按上: 台站",
                  controls.audio_enabled ? controls.volume : 0);
         lv_obj_t *hint = find_text(lv_screen_active(), footer);
         assert(hint);
@@ -631,6 +661,35 @@ int main(int argc, char **argv)
         fmo_ui_render(&state,"",ssid,password,82,13000,false,&controls);
         lv_refr_now(display);
         assert(((lv_label_t *)selected)->offset.x==offset); // Periodic UI updates must not restart scrolling.
+    }
+    if (controls.view == FMO_VIEW_STATIONS) {
+        verify("台站列表",0xFF8A00);
+        const char *footer=controls.stations.audio_paused ? "切换期间暂停音频" : "上下选择 OK切换 长按OK返回";
+        verify(footer,0x929292);
+        lv_obj_t *hint=find_text(lv_screen_active(),footer);
+        lv_point_t size;
+        lv_text_get_size(&size,footer,&fmo_channel_font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        assert(size.x<=216);
+        assert(lv_obj_get_style_text_font(hint,0)==&fmo_channel_font);
+        int first=320,last=0;
+        for(int y=282;y<320;++y) for(int x=0;x<240;++x) if(pixels[y*240+x]) {
+            if(y<first)first=y;
+            if(y>last)last=y;
+            assert(x>=12 && x<228);
+        }
+        assert(first>=294 && last<312);
+        // Exercise real overlay allocation, including QR, repeatedly within 24 KiB.
+        for(unsigned i=0;i<30;++i) {
+            controls.view=FMO_VIEW_MONITOR;
+            fmo_ui_render(&state,"","","",82,12000,false,&controls);
+            lv_refr_now(display);
+            controls.view=FMO_VIEW_SETUP; controls.setup_info=false;
+            fmo_ui_render(&state,"","FMO-Setup-TEST","ABCDEF012345",82,12000,false,&controls);
+            lv_refr_now(display);
+            controls.view=FMO_VIEW_STATIONS;
+            fmo_ui_render(&state,"","","",82,12000,false,&controls);
+            lv_refr_now(display);
+        }
     }
     lv_mem_monitor_t memory;
     lv_mem_monitor(&memory);

@@ -16,6 +16,7 @@
 
 static const char *TAG = "fmo_audio";
 static atomic_bool s_online;
+static atomic_bool s_suspended, s_suspend_ack;
 static atomic_uchar s_volume;
 static TaskHandle_t s_task;
 static portMUX_TYPE s_pcm_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -70,7 +71,7 @@ static bool wait_for_pcm_space(const esp_websocket_event_data_t *data)
     for (;;) {
         taskENTER_CRITICAL(&s_pcm_lock);
         bool accepting = s_accepting && generation == s_stream_generation &&
-                         atomic_load(&s_online) && atomic_load(&s_volume);
+                         atomic_load(&s_online) && !atomic_load(&s_suspended) && atomic_load(&s_volume);
         bool ready = s_pcm.active ||
                      s_pcm.count + s_pcm.pending_count + reserve <= FMO_PCM_CAPACITY;
         uint64_t elapsed = now_ms() - start;
@@ -106,7 +107,7 @@ static void audio_event(void *arg, esp_event_base_t base, int32_t id, void *even
         esp_websocket_event_data_t *data = event;
         if (!data || !wait_for_pcm_space(data)) return;
         taskENTER_CRITICAL(&s_pcm_lock);
-        if (s_accepting && atomic_load(&s_online) && atomic_load(&s_volume)) {
+        if (s_accepting && atomic_load(&s_online) && !atomic_load(&s_suspended) && atomic_load(&s_volume)) {
             uint32_t dropped_before = s_pcm.dropped_samples;
             fmo_pcm_result_t result = FMO_PCM_INVALID;
             if (data->payload_len < 0 || data->payload_offset < 0 || data->data_len < 0)
@@ -200,7 +201,7 @@ static void audio_task(void *argument)
             written_samples = played_samples = write_max_ms = 0;
         }
         unsigned volume = atomic_load(&s_volume);
-        bool play = atomic_load(&s_online) && volume;
+        bool play = atomic_load(&s_online) && !atomic_load(&s_suspended) && volume;
         if (wifi_awake && (!play || !codec_ready)) {
             esp_err_t err = esp_wifi_set_ps(saved_ps);
             wifi_awake = false;
@@ -213,6 +214,7 @@ static void audio_task(void *argument)
             }
             if (!play) {
                 stop_stream(&client);
+                atomic_store(&s_suspend_ack, atomic_load(&s_suspended));
                 retry_ms = 0;
                 ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
                 continue;
@@ -248,7 +250,7 @@ static void audio_task(void *argument)
              * six 240-frame DMA buffers (180 ms at 8 kHz), replacing any audio
              * left in hardware even after a quick off/on transition. */
             for (unsigned i = 0; i < 16; ++i) {
-                if (!atomic_load(&s_online) || !atomic_load(&s_volume)) break;
+                if (!atomic_load(&s_online) || atomic_load(&s_suspended) || !atomic_load(&s_volume)) break;
                 if (bsp_audio_write(output, sizeof(output)) != ESP_OK) {
                     codec_ready = false;
                     break;
@@ -260,7 +262,7 @@ static void audio_task(void *argument)
                 ESP_LOGW(TAG, "Audio priming failed; disabled until reboot");
                 continue;
             }
-            if (!atomic_load(&s_online) || !atomic_load(&s_volume)) continue;
+            if (!atomic_load(&s_online) || atomic_load(&s_suspended) || !atomic_load(&s_volume)) continue;
             volume = atomic_load(&s_volume);
         }
         if (client && stream_stalled()) {
@@ -290,7 +292,7 @@ static void audio_task(void *argument)
         uint8_t level = fmo_audio_meter_measure(output, FMO_PCM_CHUNK_SAMPLES);
         /* Check again after receiving PCM so a UI mute/disconnect cannot leave
          * an old chunk queued after the requested transition. */
-        if (!atomic_load(&s_online) || !atomic_load(&s_volume)) {
+        if (!atomic_load(&s_online) || atomic_load(&s_suspended) || !atomic_load(&s_volume)) {
             bsp_audio_set_volume(0);
             applied_volume = 0;
             continue;
@@ -309,7 +311,7 @@ static void audio_task(void *argument)
             played_samples += (uint32_t)available;
             taskENTER_CRITICAL(&s_pcm_lock);
             if (generation == s_stream_generation && s_accepting &&
-                atomic_load(&s_online) && atomic_load(&s_volume)) {
+                atomic_load(&s_online) && !atomic_load(&s_suspended) && atomic_load(&s_volume)) {
                 s_level = level;
                 s_level_ms = now_ms();
             }
@@ -352,8 +354,22 @@ uint8_t fmo_audio_get_level(void)
 {
     uint64_t now = now_ms();
     taskENTER_CRITICAL(&s_pcm_lock);
-    uint8_t level = s_accepting && atomic_load(&s_online) && atomic_load(&s_volume) &&
+    uint8_t level = s_accepting && atomic_load(&s_online) && !atomic_load(&s_suspended) && atomic_load(&s_volume) &&
                     now >= s_level_ms && now - s_level_ms <= 120 ? s_level : 0;
     taskEXIT_CRITICAL(&s_pcm_lock);
     return level;
+}
+
+void fmo_audio_suspend(bool suspend)
+{
+    if (atomic_exchange(&s_suspended, suspend) != suspend) {
+        if (suspend) clear_level();
+        else atomic_store(&s_suspend_ack, false);
+        if (s_task) xTaskNotifyGive(s_task);
+    }
+}
+
+bool fmo_audio_is_suspended(void)
+{
+    return !s_task || (atomic_load(&s_suspended) && atomic_load(&s_suspend_ack));
 }

@@ -27,7 +27,32 @@ void fmo_controls_observe_setup(fmo_controls_t *c, bool active)
 }
 fmo_action_t fmo_controls_key(fmo_controls_t *c, fmo_key_t key)
 {
-    if (key == FMO_KEY_REFRESH) return FMO_ACTION_REFRESH;
+    if (c->view == FMO_VIEW_STATIONS) {
+        if (key == FMO_KEY_BACK) { c->view = FMO_VIEW_MONITOR; return FMO_ACTION_NONE; }
+        if (c->stations.request != FMO_STATION_NONE) return FMO_ACTION_NONE;
+        if (key == FMO_KEY_OK) {
+            if (c->stations.status == FMO_STATIONS_LOAD_FAILED ||
+                c->stations.status == FMO_STATIONS_EMPTY) return FMO_ACTION_STATIONS;
+            if (c->selection < c->stations.count) return FMO_ACTION_STATION_SWITCH;
+        }
+        if (key == FMO_KEY_UP) {
+            if (c->selection) --c->selection;
+            else if (c->stations.start) {
+                c->stations.start -= FMO_STATION_PAGE_SIZE;
+                c->selection = FMO_STATION_PAGE_SIZE - 1;
+                return FMO_ACTION_STATIONS;
+            }
+        }
+        if (key == FMO_KEY_DOWN) {
+            if (c->selection + 1 < c->stations.count) ++c->selection;
+            else if (c->stations.has_next) {
+                c->stations.start += FMO_STATION_PAGE_SIZE;
+                c->selection = 0;
+                return FMO_ACTION_STATIONS;
+            }
+        }
+        return FMO_ACTION_NONE;
+    }
     if (c->view == FMO_VIEW_SETUP) {
         if (key == FMO_KEY_OK) c->setup_info = !c->setup_info;
         if (key == FMO_KEY_BACK || key == FMO_KEY_UP || key == FMO_KEY_DOWN) {
@@ -82,7 +107,16 @@ fmo_action_t fmo_controls_key(fmo_controls_t *c, fmo_key_t key)
     case FMO_KEY_OK:
         c->audio_enabled = !c->audio_enabled;
         return FMO_ACTION_AUDIO;
-    case FMO_KEY_REFRESH: return FMO_ACTION_REFRESH;
+    case FMO_KEY_STATIONS:
+        c->view = FMO_VIEW_STATIONS;
+        if (c->stations.request == FMO_STATION_NONE) {
+            c->selection = 0;
+            c->stations.start = 0;
+            return FMO_ACTION_STATIONS;
+        }
+        for (unsigned i = 0; i < c->stations.count; ++i)
+            if (c->stations.rows[i].uid == c->stations.target_uid) c->selection = i;
+        break;
     case FMO_KEY_BACK: c->view = FMO_VIEW_NETWORK; c->selection = 0; break;
     }
     return FMO_ACTION_NONE;

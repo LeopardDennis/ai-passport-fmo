@@ -184,6 +184,16 @@ esp_err_t bsp_audio_write(const void *pcm,size_t bytes) {
             assert(stops==1 && destroys==1 && prime_writes==32);
             longjmp(done,1);
         } else for(size_t i=0;i<160;++i)assert(samples[i]==0);
+    } else if(mode==9) {
+        if(writes==1) {
+            assert(starts==1 && prime_writes==16);
+            fmo_audio_suspend(true);
+            assert(!fmo_audio_is_suspended() && fmo_audio_get_level()==0);
+        } else {
+            assert(starts==2 && stops==1 && destroys==1 && prime_writes==32);
+            for(size_t i=0;i<160;++i)assert(samples[i]==0x5678);
+            longjmp(done,1);
+        }
     } else if(mode==4) return ESP_FAIL;
     else if(mode==5 && writes==2) {
         /* A reconnect while codec I/O blocks must not publish the old chunk. */
@@ -194,6 +204,12 @@ esp_err_t bsp_audio_write(const void *pcm,size_t bytes) {
 }
 unsigned ulTaskNotifyTake(int clear,unsigned timeout) {
     assert(!locked && clear==pdTRUE && timeout>0);++waits;clock_ms+=timeout;
+    if(mode==9) {
+        assert(fmo_audio_is_suspended() && applied==0 && !s_pcm.count);
+        assert(stops==1 && destroys==1 && atomic_load(&s_online));
+        fmo_audio_suspend(false);
+        assert(!fmo_audio_is_suspended());
+    }
     if(mode==1) {
         assert(wifi_ps==WIFI_PS_MAX_MODEM);
         assert(applied==0 && !s_pcm.count);
@@ -215,6 +231,7 @@ static void reset_test(int scenario) {
     applied=writes=waits=notifications=prime_writes=0;clock_ms=1000;
     init_fail=register_fail=start_fail=codec_fail=0;callback=NULL;
     wifi_ps=WIFI_PS_MAX_MODEM;wifi_awake_calls=wifi_restore_calls=0;
+    atomic_store(&s_suspended,false);atomic_store(&s_suspend_ack,false);
     reset_stream(false);atomic_store(&s_online,true);atomic_store(&s_volume,50);
 }
 int main(void) {
@@ -238,6 +255,10 @@ int main(void) {
         if(scenario==3)assert(!wifi_awake_calls);
         if(scenario==4)assert(wifi_awake_calls==1 && wifi_restore_calls==1);
     }
+    // Station switching waits for muted codec + joined callbacks before sending.
+    reset_test(9);
+    if(!setjmp(done))audio_task(NULL);
+    assert(!locked);
     // Bursting socket reads yield to the codec instead of discarding words.
     reset_test(6);callback=audio_event;starts=1;reset_stream(true);
     uint32_t burst_drops=s_dropped_samples, burst_bytes=s_received_bytes;

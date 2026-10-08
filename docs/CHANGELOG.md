@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Add on-device station switching: long UP opens a six-row paged list using the existing fonts, colors and single-line footer; OK switches directly and long OK returns. Keep audio playing while browsing, preserve volume/mute settings, mark the current station and scroll selected long names. Serialize station requests with channel polling, wait for audio shutdown before sending, clear old metadata, and confirm the actual UID before resuming. Reconcile failed, timed-out or disconnected switches without automatic resends. Cover paging, repeated input, late replies, partial sends, audio shutdown/restart and native UI allocation/layout under the existing 24 KiB pool. Physical-device switching and playback remain unverified.
+
 - Reduce saved Wi-Fi names from 16 px to 14 px, preserving the full existing glyph set through bounded glyph resampling. Balance the first/last row gaps against the status and footer while retaining five networks and the connected check mark.
 
 - Center saved Wi-Fi name letter bodies vertically, without letting underscores or descenders raise the rest of the text. Replace the connected-network wording with a compact check mark, retaining the FMO palette and a consistent name column.
