@@ -22,11 +22,11 @@ execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/compact_font.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/fonts/fmo_channel_font.c")
-add_executable(fmo_ui_preview ../test_fmo_ui.c ../../assets/fonts/fmo_callsign_bold_14.c ../../assets/fonts/fmo_callsign_bold_20.c ../../assets/fonts/fmo_callsign_bold_32.c ../../main/fmo_ui.c ../../main/fmo_audio_meter.c ../../main/fmo_clock.c ../../main/fmo_controls.c ../../main/fmo_wifi_qr.c ../../main/fmo_monitor_state.c ../../main/fmo_text.c "${FMO_COMPACT_FONT}")
+add_executable(fmo_ui_preview ../test_fmo_ui.c ../../assets/fonts/fmo_callsign_bold_14.c ../../assets/fonts/fmo_callsign_bold_20.c ../../assets/fonts/fmo_callsign_bold_32.c ../../main/fmo_ui.c ../../main/fmo_wifi_font.c ../../main/fmo_audio_meter.c ../../main/fmo_clock.c ../../main/fmo_controls.c ../../main/fmo_wifi_qr.c ../../main/fmo_monitor_state.c ../../main/fmo_text.c "${FMO_COMPACT_FONT}")
 target_include_directories(fmo_ui_preview PRIVATE ../../main)
 target_link_libraries(fmo_ui_preview PRIVATE lvgl m)
 enable_testing()
 add_test(NAME fmo_ui COMMAND fmo_ui_preview)
-foreach(state IN ITEMS cross idle empty lan muted lastheard offline setup setup_info network long rare error meter_low meter_mid meter_high)
+foreach(state IN ITEMS cross idle empty lan muted lastheard offline setup setup_info network network_retry network_back wifi_saved wifi_current wifi_empty wifi_offline wifi_long long rare brackets symbols error meter_low meter_mid meter_high)
     add_test(NAME fmo_ui_${state} COMMAND fmo_ui_preview ${state})
 endforeach()

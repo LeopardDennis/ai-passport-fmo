@@ -11,6 +11,37 @@ from pathlib import Path
 FIELDS = ("bitmap_index", "adv_w", "box_w", "box_h", "ofs_x", "ofs_y")
 
 
+def read_cmaps(source):
+    """Normalize generated tiny cmaps into contiguous runs without filling gaps."""
+    raw = re.search(r"cmaps\[\]\s*=\s*\{(.*?)\n\};", source, re.S)[1]
+    maps = []
+    for record in re.findall(r"\{([^{}]+)\}", raw):
+        cmap = dict((key, int(value)) for key, value in re.findall(
+            r"\.(range_start|range_length|glyph_id_start)\s*=\s*(\d+)", record))
+        kind = re.search(r"\.type\s*=\s*(\w+)", record)[1]
+        if kind == "LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY":
+            maps.append(cmap)
+        elif kind == "LV_FONT_FMT_TXT_CMAP_SPARSE_TINY":
+            name = re.search(r"\.unicode_list\s*=\s*(\w+)", record)[1]
+            values = re.search(r"\b" + re.escape(name) + r"\[\]\s*=\s*\{(.*?)\};", source, re.S)[1]
+            offsets = [int(value, 0) for value in re.findall(r"0x[0-9a-fA-F]+|\d+", values)]
+            length = int(re.search(r"\.list_length\s*=\s*(\d+)", record)[1])
+            if (len(offsets) != length or offsets != sorted(set(offsets)) or
+                    not offsets or offsets[-1] >= cmap["range_length"]):
+                raise ValueError("Invalid sparse cmap offsets")
+            for index, offset in enumerate(offsets):
+                code = cmap["range_start"] + offset
+                glyph = cmap["glyph_id_start"] + index
+                if (maps and maps[-1]["range_start"] + maps[-1]["range_length"] == code and
+                        maps[-1]["glyph_id_start"] + maps[-1]["range_length"] == glyph):
+                    maps[-1]["range_length"] += 1
+                else:
+                    maps.append(dict(range_start=code, range_length=1, glyph_id_start=glyph))
+        else:
+            raise ValueError("Only tiny cmaps are supported")
+    return maps
+
+
 def read_font(path):
     source = Path(path).read_text()
     # Fail explicitly if regeneration changes the pinned font's rendering ABI.
@@ -27,12 +58,7 @@ def read_font(path):
     glyphs = [dict((key, int(value)) for key, value in
                    re.findall(r"\.(\w+)\s*=\s*(-?\d+)", record))
               for record in re.findall(r"\{([^{}]+)\}", raw)]
-    raw = re.search(r"cmaps\[\]\s*=\s*\{(.*?)\n\};", source, re.S)[1]
-    maps = [dict((key, int(value)) for key, value in
-                 re.findall(r"\.(range_start|range_length|glyph_id_start)\s*=\s*(\d+)", record))
-            for record in re.findall(r"\{([^{}]+)\}", raw)]
-    if "CMAP_SPARSE" in raw or "CMAP_FORMAT0_FULL" in raw:
-        raise ValueError("Only contiguous tiny cmaps are supported")
+    maps = read_cmaps(source)
     for glyph in glyphs:
         if set(glyph) != set(FIELDS) or not (0 <= glyph["adv_w"] < 4096 and
                 0 <= glyph["box_w"] < 256 and 0 <= glyph["box_h"] < 256 and

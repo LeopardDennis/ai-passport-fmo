@@ -11,6 +11,7 @@ endif()
 idf_component_register(
     SRCS "main.c"
          "fmo_ui.c"
+         "fmo_wifi_font.c"
          "fmo_clock.c"
          "fmo_audio.c"
          "fmo_pcm.c"

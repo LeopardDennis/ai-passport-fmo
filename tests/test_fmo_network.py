@@ -34,8 +34,10 @@ def run():
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
         "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "expire_channel", "cleanup_wifi", "prepare_network", "post_link"))
+    functions += "\n" + source[source.index("void fmo_network_request_retry(void)"):source.index("bool fmo_network_get_saved_wifi(")]
     preamble = r'''
 #include "fmo_monitor_state.h"
+#include "fmo_wifi_profiles.h"
 #include "fmo_text.h"
 #include "fmo_link_policy.h"
 #include "fmo_ws_rx.h"
@@ -94,6 +96,9 @@ static int station_handle, *s_station;
 static bool s_wifi_initialized;
 static void *s_wifi_handler, *s_ip_handler;
 static int s_wifi_bits, unregistered, destroyed;
+static int s_network_task, retry_notices, retry_cancel_bits;
+static void xTaskNotifyGive(int task) { assert(task==1);++retry_notices; }
+static void xEventGroupSetBits(int group,int mask) { assert(group==1);retry_cancel_bits|=mask; }
 #define WIFI_EVENT 1
 #define ESP_EVENT_ANY_ID 0
 #define IP_EVENT 2
@@ -103,6 +108,8 @@ static int s_wifi_bits, unregistered, destroyed;
 #define FMO_WIFI_STOPPED_BIT 4
 #define FMO_WIFI_CANCEL_BIT 8
 static int esp_event_handler_instance_unregister(int base,int id,void *handler){(void)base;(void)id;assert(handler);++unregistered;return 0;}
+typedef struct {unsigned char ssid[33];} wifi_ap_record_t;
+static int esp_wifi_sta_get_ap_info(wifi_ap_record_t *ap){strcpy((char *)ap->ssid,"actual-wifi");return 0;}
 static int esp_wifi_stop(void){assert(s_wifi_initialized);return 0;}
 static int esp_wifi_deinit(void){assert(s_wifi_initialized);++cleanups;return 0;}
 static void esp_netif_destroy_default_wifi(int *station){assert(station==&station_handle);++destroyed;}
@@ -143,7 +150,7 @@ static void query(void) { s_query_pending = true; s_query_revision = s_speaker_r
 #define START "{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"BG5ESN\",\"isSpeaking\":true,\"grid\":\"PM01\"}}"
 int main(void) {
     fmo_update_t link = {.type=FMO_UPDATE_WIFI, .connected=true};
-    post_update(&link); link.type=FMO_UPDATE_EVENTS_LINK; post_update(&link);
+    strcpy(link.text,"actual-wifi");post_update(&link);assert(!strcmp(published.connected_ssid,"actual-wifi")); link.type=FMO_UPDATE_EVENTS_LINK; post_update(&link);
     link.type=FMO_UPDATE_CONTROL_LINK; post_update(&link);
     query(); parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL42);
     assert(published.state.channel_valid && !strcmp(published.state.channel_name, "安吉FMO中继"));
@@ -271,7 +278,7 @@ int main(void) {
     query(); link.type=FMO_UPDATE_WIFI; link.connected=false; post_update(&link);
     parse_fmo_message(FMO_SOCKET_CONTROL, CHANNEL42);
     parse_fmo_message(FMO_SOCKET_EVENTS, START);
-    assert(!s_snapshot.state.channel_valid && !s_snapshot.state.speaking);
+    assert(!s_snapshot.state.channel_valid && !s_snapshot.state.speaking && !s_snapshot.connected_ssid[0]);
     assert(refreshes > 0 && !locked);
     // Exercise the actual coordinator query function with a controllable clock.
     link.connected=true; post_update(&link);
@@ -477,6 +484,13 @@ int main(void) {
     update_clock_service(false);update_clock_service(true);
     assert(clock_inits==2 && clock_restarts==1 && s_clock_online);
     assert(s_snapshot.state.speaking);
+    s_wifi_bits=s_network_task=1;
+    atomic_store(&s_setup_active,true);
+    fmo_network_request_retry();
+    assert(atomic_load(&s_retry_requested) && retry_cancel_bits==FMO_WIFI_CANCEL_BIT && retry_notices==1);
+    atomic_store(&s_setup_active,false);retry_cancel_bits=0;
+    fmo_network_request_retry();
+    assert(!retry_cancel_bits && retry_notices==2);
     recovery_test=true;prepare_network();
     assert(storage_attempts==3 && wifi_attempts==2 && cleanups==1 && backoffs==2);
     assert(setup_checks==2 && !last_error[0] && !atomic_load(&s_retry_requested));

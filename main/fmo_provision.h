@@ -1,6 +1,7 @@
 #pragma once
 #include "esp_wifi.h"
 #include "fmo_endpoint.h"
+#include "fmo_wifi_profiles.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include <stdbool.h>
@@ -15,6 +16,10 @@ esp_err_t fmo_provision_force(void);
 /* Network-worker only, outside provisioning. Scans only while disconnected. */
 bool fmo_provision_next(wifi_config_t *config, uint8_t *tried);
 uint8_t fmo_provision_preferred_mask(void);
+/* UI-safe, non-blocking: false leaves the caller's previous list intact. */
+bool fmo_provision_saved_wifi(fmo_wifi_list_t *list);
+/* Worker only: resolve a name again so web deletions cannot select a stale index. */
+bool fmo_provision_config_saved(const char *ssid, wifi_config_t *config, uint8_t *tried);
 void fmo_provision_remember_connected(void);
 /* Event-loop callback: record the reason for a failed setup attempt. */
 void fmo_provision_note_disconnect_reason(uint8_t reason);

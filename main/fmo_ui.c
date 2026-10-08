@@ -2,6 +2,7 @@
 #include "fmo_clock.h"
 #include "fmo_audio_meter.h"
 #include "fmo_wifi_qr.h"
+#include "fmo_wifi_font.h"
 #include "src/misc/lv_text_private.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -94,6 +95,32 @@ static int center_ink(lv_obj_t *obj, int top, int height, uint32_t reference)
     return y + ink_bottom - 1;
 }
 
+/* Center the letter bodies in saved names. Underscores and descenders must
+ * not push Latin names visibly above the middle of the row. */
+static void center_wifi_name(lv_obj_t *obj, int top, int height)
+{
+    const lv_font_t *font = lv_obj_get_style_text_font(obj, 0);
+    lv_font_glyph_dsc_t glyph;
+    if (!lv_font_get_glyph_dsc(font, &glyph, 'H', 0)) { center_ink(obj, top, height, 'H'); return; }
+    int baseline = font->line_height - font->base_line - glyph.ofs_y;
+    int ink_top = INT32_MAX, ink_bottom = INT32_MIN;
+    const char *value = lv_label_get_text(obj);
+    uint32_t index = 0;
+    while (value[index]) {
+        uint32_t code = lv_text_encoded_next(value, &index);
+        if (code == '_' || !lv_font_get_glyph_dsc(font, &glyph, code, 0) || !glyph.box_h || !glyph.box_w) continue;
+        int y = font->line_height - font->base_line - glyph.box_h - glyph.ofs_y;
+        int bottom = y + glyph.box_h;
+        if (code < 128 && bottom > baseline) bottom = baseline;
+        if (bottom <= y) continue;
+        if (y < ink_top) ink_top = y;
+        if (bottom > ink_bottom) ink_bottom = bottom;
+    }
+    if (ink_top == INT32_MAX) { center_ink(obj, top, height, 'H'); return; }
+    int y = top + (height - (ink_bottom - ink_top) + 1) / 2 - ink_top;
+    if (lv_obj_get_style_y(obj, 0) != y) lv_obj_set_y(obj, y);
+}
+
 static lv_obj_t *label(lv_obj_t *parent, int x, int y, int w,
                         const lv_font_t *font, uint32_t ink, const char *value)
 {
@@ -123,7 +150,28 @@ static lv_obj_t *rect(lv_obj_t *parent, int x, int y, int w, int h, uint32_t ink
  * but release inactive page objects to fit the firmware's 24 KiB LVGL pool. */
 static lv_obj_t *monitor_content;
 static void create_monitor(void);
-static lv_obj_t *overlay, *menu_status, *menu_rows[3], *menu_labels[3];
+static lv_obj_t *overlay, *menu_status, *menu_rows[5], *menu_labels[5], *wifi_badge;
+static unsigned wifi_row_count, wifi_row_selection;
+#define WIFI_ROWS_TOP 72
+#define WIFI_ROW_STEP 30
+#define WIFI_ROW_HEIGHT 25
+
+/* Draw row backgrounds directly, retaining redraw headroom in the 24 KiB pool. */
+static void draw_wifi_rows(lv_event_t *event)
+{
+    lv_area_t parent;
+    lv_obj_get_coords(lv_event_get_target(event), &parent);
+    for (unsigned i = 0; i < wifi_row_count; ++i) {
+        lv_area_t area = {.x1=parent.x1+12, .x2=parent.x1+227,
+            .y1=parent.y1+WIFI_ROWS_TOP+WIFI_ROW_STEP*i,
+            .y2=parent.y1+WIFI_ROWS_TOP+WIFI_ROW_STEP*i+WIFI_ROW_HEIGHT-1};
+        lv_draw_rect_dsc_t dsc;
+        lv_draw_rect_dsc_init(&dsc);
+        dsc.bg_color = lv_color_hex(i == wifi_row_selection ? ORANGE : LINE);
+        dsc.bg_opa = LV_OPA_COVER;
+        lv_draw_rect(lv_event_get_layer(event), &dsc, &area);
+    }
+}
 static fmo_view_t overlay_view = FMO_VIEW_MONITOR;
 static bool overlay_info;
 static char overlay_ssid[33], overlay_password[17];
@@ -160,13 +208,22 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
         if (view == FMO_VIEW_NETWORK) {
             label(overlay, 12, 10, 216, &fmo_channel_font, ORANGE, "网络设置");
             menu_status = label(overlay, 12, 52, 216, &fmo_channel_font, MUTED, "");
-            const char *items[] = {"Wi-Fi 配网", "重连 Wi-Fi", "返回守听"};
+            const char *items[] = {"Wi-Fi 配网", "重连 Wi-Fi", "返回"};
             for (unsigned i = 0; i < 3; ++i) {
                 menu_rows[i] = rect(overlay, 12, 96 + 44 * i, 216, 36, LINE);
                 menu_labels[i] = label(menu_rows[i], 8, 6, 200, &fmo_channel_font, WHITE, items[i]);
                 center_ink(menu_labels[i], 0, 36, 0x4E2D);
             }
             label(overlay, 12, 220, 216, &fmo_channel_font, WHITE, "上/下选择  确认进入");
+            label(overlay, 12, 248, 216, &fmo_channel_font, MUTED, "长按确认: 返回");
+        } else if (view == FMO_VIEW_WIFI) {
+            label(overlay, 12, 10, 216, &fmo_channel_font, ORANGE, "选择 Wi-Fi");
+            menu_status = label(overlay, 12, 36, 216, &fmo_channel_font, MUTED, "");
+            lv_obj_add_event_cb(overlay, draw_wifi_rows, LV_EVENT_DRAW_MAIN, NULL);
+            for (unsigned i = 0; i < FMO_WIFI_PROFILE_MAX; ++i)
+                menu_labels[i] = label(overlay, 20, WIFI_ROWS_TOP + 2 + WIFI_ROW_STEP * i, 200, fmo_wifi_font(), WHITE, "");
+            wifi_badge = label(overlay, 204, WIFI_ROWS_TOP + 2, 16, &lv_font_montserrat_14, ORANGE, LV_SYMBOL_OK);
+            label(overlay, 12, 220, 216, &fmo_channel_font, WHITE, "上/下选择  确认连接");
             label(overlay, 12, 248, 216, &fmo_channel_font, MUTED, "长按确认: 返回");
         } else {
             bool info = controls->setup_info;
@@ -219,12 +276,43 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
             }
             label(overlay, 12, 220, 216, &fmo_channel_font, WHITE,
                   controls->setup_info ? "短按确认: 扫码连接" : "短按确认: 热点信息");
-            label(overlay, 12, 248, 216, &fmo_channel_font, MUTED, "长按确认: 取消配网");
+            label(overlay, 12, 248, 216, &fmo_channel_font, MUTED, "上/下或长按确认: 返回菜单");
 
         }
     }
+    if (view == FMO_VIEW_WIFI) {
+        char status[48];
+        snprintf(status, sizeof(status), controls->wifi.count ? "已保存 %u/5 组" : "尚未保存 Wi-Fi", controls->wifi.count);
+        text(menu_status, controls->wifi.count && controls->selection >= controls->wifi.count ?
+             "列表已更新，请重新选择" : status);
+        if (wifi_row_count != controls->wifi.count || wifi_row_selection != controls->selection) {
+            wifi_row_count = controls->wifi.count;
+            wifi_row_selection = controls->selection;
+            lv_obj_invalidate(overlay);
+        }
+        lv_obj_add_flag(wifi_badge, LV_OBJ_FLAG_HIDDEN);
+        for (unsigned i = 0; i < FMO_WIFI_PROFILE_MAX; ++i) {
+            if (i >= controls->wifi.count) { lv_obj_add_flag(menu_labels[i], LV_OBJ_FLAG_HIDDEN); continue; }
+            lv_obj_remove_flag(menu_labels[i], LV_OBJ_FLAG_HIDDEN);
+            bool selected = i == controls->selection;
+            bool current = connected && !strcmp(controls->wifi.names[i], controls->connected_ssid);
+            text(menu_labels[i], controls->wifi.names[i]);
+            lv_obj_set_width(menu_labels[i], 176);
+            lv_label_long_mode_t mode = selected ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT;
+            if (lv_label_get_long_mode(menu_labels[i]) != mode)
+                lv_label_set_long_mode(menu_labels[i], mode);
+            center_wifi_name(menu_labels[i], WIFI_ROWS_TOP + WIFI_ROW_STEP * i, WIFI_ROW_HEIGHT);
+            color(menu_labels[i], selected ? BLACK : WHITE);
+            if (current) {
+                color(wifi_badge, selected ? BLACK : ORANGE);
+                center_ink(wifi_badge, WIFI_ROWS_TOP + WIFI_ROW_STEP * i, WIFI_ROW_HEIGHT, 'H');
+                lv_obj_remove_flag(wifi_badge, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
     if (view == FMO_VIEW_NETWORK) {
-        text(menu_status, connected ? "Wi-Fi 已连接" : "Wi-Fi 未连接");
+        text(menu_status, controls->hotspot_active ? "配网热点已开启" :
+             connected ? "Wi-Fi 已连接" : "Wi-Fi 未连接");
         for (unsigned i = 0; i < 3; ++i) {
             lv_color_t fill = lv_color_hex(i == controls->selection ? ORANGE : LINE);
             if (!lv_color_eq(lv_obj_get_style_bg_color(menu_rows[i], 0), fill))

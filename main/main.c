@@ -102,7 +102,10 @@ static void apply_input(const app_input_t *input)
         s_hint_until_ms = monotonic_ms() + 3000;
         break;
     case FMO_ACTION_SETUP: fmo_network_request_setup(); break;
-    case FMO_ACTION_RETRY: fmo_network_request_retry(); break;
+    case FMO_ACTION_RETRY:
+        if (!fmo_network_request_wifi(s_controls.wifi.names[s_controls.selection]))
+            s_controls.view = FMO_VIEW_WIFI;
+        break;
     case FMO_ACTION_CANCEL: fmo_network_cancel_setup(); break;
     case FMO_ACTION_NONE: break;
     }
@@ -112,7 +115,7 @@ static void apply_input(const app_input_t *input)
 // backlight dark until a full redraw has completed on wake. Network tasks stay on.
 static bool update_display(uint64_t now)
 {
-    bool keep_awake = s_setup_ssid[0] || s_controls.view == FMO_VIEW_NETWORK ||
+    bool keep_awake = s_setup_ssid[0] || s_controls.view != FMO_VIEW_MONITOR ||
                       (s_state.wifi_connected && s_state.events_connected && s_state.speaking);
     fmo_display_level_t target = fmo_display_policy_step(&s_display_policy, now, keep_awake);
     bool dark = atomic_load(&s_display_dark);
@@ -166,6 +169,7 @@ static void ui_tick(lv_timer_t *timer)
             s_speech_activity = snapshot.speech_activity;
         }
         s_state = snapshot.state;
+        memcpy(s_controls.connected_ssid, snapshot.connected_ssid, sizeof(s_controls.connected_ssid));
         snprintf(s_setup_ssid, sizeof(s_setup_ssid), "%s", snapshot.setup_ssid);
         snprintf(s_setup_password, sizeof(s_setup_password), "%s", snapshot.setup_password);
         snprintf(s_error, sizeof(s_error), "%s", snapshot.error);
@@ -173,6 +177,11 @@ static void ui_tick(lv_timer_t *timer)
         dirty = true;
     }
 
+    fmo_wifi_list_t wifi;
+    if (fmo_network_get_saved_wifi(&wifi) && memcmp(&wifi, &s_controls.wifi, sizeof(wifi))) {
+        fmo_controls_observe_wifi(&s_controls, &wifi);
+        dirty = true;
+    }
     app_input_t input;
     for (unsigned i = 0; i < 8 && xQueueReceive(s_input_queue, &input, 0) == pdTRUE; ++i) {
         apply_input(&input);

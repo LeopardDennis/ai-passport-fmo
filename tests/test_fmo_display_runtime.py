@@ -55,7 +55,10 @@ static void mark(char c) { size_t n=strlen(trace); assert(n+1<sizeof(trace)); tr
 static uint64_t monotonic_ms(void) { return clock_ms; }
 static void fmo_network_request_refresh(void) { ++requests; }
 static void fmo_network_request_setup(void) { ++setups; }
-static void fmo_network_request_retry(void) { ++retries; }
+static bool fmo_network_get_saved_wifi(fmo_wifi_list_t *list) {
+    memset(list,0,sizeof(*list));list->count=2;strcpy(list->names[0],"home");strcpy(list->names[1],"office");return true;
+}
+static bool fmo_network_request_wifi(const char *ssid) { assert(!strcmp(ssid,"office"));++retries;return true; }
 static void fmo_network_cancel_setup(void) { ++cancels; }
 static lv_display_t *lv_display_get_default(void) { static int display; return &display; }
 static lv_timer_t *lv_display_get_refr_timer(lv_display_t *d) { return d; }
@@ -110,10 +113,19 @@ int main(void) {
     assert(!setups && s_controls.view==FMO_VIEW_NETWORK);
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(setups==1);
     fmo_controls_observe_setup(&s_controls, true);
+    assert(s_controls.view==FMO_VIEW_NETWORK && s_controls.selection==0);
+    key(BSP_BTN_DOWN, BSP_BTN_PRESS); key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    assert(s_controls.selection==1);
+    key(BSP_BTN_UP, BSP_BTN_PRESS); key(BSP_BTN_UP, BSP_BTN_CLICK);
+    assert(s_controls.selection==0);
+    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.view==FMO_VIEW_SETUP);
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.setup_info);
     key(BSP_BTN_OK, BSP_BTN_LONG); assert(cancels==1);
     fmo_controls_observe_setup(&s_controls, false);
     key(BSP_BTN_DOWN, BSP_BTN_CLICK); key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(!retries && s_controls.view==FMO_VIEW_WIFI);
+    fmo_wifi_list_t names;fmo_network_get_saved_wifi(&names);fmo_controls_observe_wifi(&s_controls,&names);
+    key(BSP_BTN_DOWN,BSP_BTN_CLICK);key(BSP_BTN_OK,BSP_BTN_CLICK);
     assert(retries==1 && s_controls.view==FMO_VIEW_MONITOR);
     key(BSP_BTN_UP, BSP_BTN_PRESS); key(BSP_BTN_UP, BSP_BTN_CLICK);
     assert(update_display(clock_ms)); assert(brightness==80 && s_controls.volume==60 && audio_volume==60);

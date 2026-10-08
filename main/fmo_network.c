@@ -50,6 +50,8 @@ typedef struct {
 static QueueHandle_t s_update_queue;
 static SemaphoreHandle_t s_state_lock;
 static fmo_snapshot_t s_snapshot;
+static char s_selected_ssid[33];
+static bool s_selected_pending;
 static uint32_t s_speaker_revision;
 static uint32_t s_query_revision;
 static bool s_clock_initialized, s_clock_online;
@@ -88,6 +90,8 @@ static void post_update(const fmo_update_t *update)
     switch (update->type) {
     case FMO_UPDATE_WIFI:
         fmo_monitor_set_wifi(state, update->connected);
+        snprintf(s_snapshot.connected_ssid, sizeof(s_snapshot.connected_ssid), "%.32s",
+                 update->connected ? update->text : "");
         if (!update->connected) {
             s_query_pending = false;
         }
@@ -152,6 +156,11 @@ static void post_update(const fmo_update_t *update)
 static void post_link(fmo_update_type_t type, bool connected)
 {
     fmo_update_t update = { .type = type, .connected = connected };
+    if (type == FMO_UPDATE_WIFI && connected) {
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+            snprintf(update.text, sizeof(update.text), "%.32s", (const char *)ap.ssid);
+    }
     post_update(&update);
 }
 
@@ -609,10 +618,54 @@ static void stop_socket(fmo_socket_t *socket)
     memset(&socket->rx, 0, sizeof(socket->rx));
 }
 
+static bool switch_saved_wifi(void);
+
 static void clear_dns_cache(void *unused)
 {
     (void)unused;
     dns_clear_cache();
+}
+
+static bool switch_saved_wifi(void)
+{
+    char ssid[33];
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if (!s_selected_pending) { xSemaphoreGive(s_state_lock); return true; }
+    memcpy(ssid, s_selected_ssid, sizeof(ssid));
+    s_selected_pending = false;
+    bool already_connected = s_snapshot.state.wifi_connected &&
+                             !strcmp(ssid, s_snapshot.connected_ssid);
+    xSemaphoreGive(s_state_lock);
+    if (already_connected) { post_error(""); return true; }
+    wifi_config_t config = {0};
+    uint8_t tried = 0;
+    if (!fmo_provision_config_saved(ssid, &config, &tried)) {
+        post_error("WI-FI NO LONGER SAVED");
+        return true;
+    }
+    atomic_store(&s_reconnect, false);
+    stop_socket(&s_events_socket);
+    stop_socket(&s_control_socket);
+    update_clock_service(false);
+    post_link(FMO_UPDATE_WIFI, false);
+    tcpip_callback_wait(clear_dns_cache, NULL);
+    /* STA_STOP prevents old DHCP callbacks from confirming the new selection. */
+    xEventGroupClearBits(s_wifi_bits, FMO_WIFI_STOPPED_BIT);
+    esp_err_t err = esp_wifi_stop();
+    if (err == ESP_OK && !(xEventGroupWaitBits(s_wifi_bits, FMO_WIFI_STOPPED_BIT,
+        pdTRUE, pdTRUE, pdMS_TO_TICKS(3000)) & FMO_WIFI_STOPPED_BIT)) err = ESP_ERR_TIMEOUT;
+    xEventGroupClearBits(s_wifi_bits, FMO_WIFI_READY_BIT | FMO_WIFI_DISCONNECTED_BIT);
+    if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_STA, &config);
+    memset(&config, 0, sizeof(config));
+    if (err == ESP_OK) err = esp_wifi_start();
+    /* Start the chosen association before enabling STA_START auto-connect. */
+    if (err == ESP_OK) err = esp_wifi_connect();
+    atomic_store(&s_reconnect, true);
+    s_tried_profiles = tried;
+    s_next_wifi_attempt = now_ms() + 25000;
+    s_was_online = false;
+    post_error(err == ESP_OK ? "" : "WIFI SWITCH FAILED");
+    return err == ESP_OK;
 }
 
 static void cleanup_wifi(void)
@@ -690,6 +743,7 @@ static void network_task(void *argument)
     s_next_wifi_attempt = now_ms() + 25000;
     while (!(xEventGroupWaitBits(s_wifi_bits, FMO_WIFI_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(1000)) & FMO_WIFI_READY_BIT)) {
         check_setup_request();
+        if (!switch_saved_wifi()) { cleanup_wifi(); prepare_network(); }
         retry_wifi();
     }
 
@@ -712,6 +766,7 @@ static void network_task(void *argument)
     unsigned diagnostics_tick = 0;
     for (;;) {
         check_setup_request();
+        if (!switch_saved_wifi()) { cleanup_wifi(); prepare_network(); }
         EventBits_t old_bits = xEventGroupClearBits(s_wifi_bits, FMO_WIFI_DISCONNECTED_BIT);
         if (!(old_bits & FMO_WIFI_READY_BIT) || (old_bits & FMO_WIFI_DISCONNECTED_BIT)) {
             update_clock_service(false);
@@ -788,8 +843,29 @@ void fmo_network_request_setup(void)
 
 void fmo_network_request_retry(void)
 {
+    // The worker may be blocked in setup. Release that loop before retrying.
+    if (s_wifi_bits && atomic_load(&s_setup_active))
+        xEventGroupSetBits(s_wifi_bits, FMO_WIFI_CANCEL_BIT);
     atomic_store(&s_retry_requested, true);
     if (s_network_task) xTaskNotifyGive(s_network_task);
+}
+
+bool fmo_network_get_saved_wifi(fmo_wifi_list_t *list)
+{
+    return fmo_provision_saved_wifi(list);
+}
+
+bool fmo_network_request_wifi(const char *ssid)
+{
+    if (!ssid || !ssid[0] || strlen(ssid) > 32 || !s_state_lock || !s_network_task) return false;
+    if (xSemaphoreTake(s_state_lock, 0) != pdTRUE) return false;
+    snprintf(s_selected_ssid, sizeof(s_selected_ssid), "%s", ssid);
+    s_selected_pending = true;
+    xSemaphoreGive(s_state_lock);
+    if (s_wifi_bits && atomic_load(&s_setup_active))
+        xEventGroupSetBits(s_wifi_bits, FMO_WIFI_CANCEL_BIT);
+    xTaskNotifyGive(s_network_task);
+    return true;
 }
 
 void fmo_network_cancel_setup(void)

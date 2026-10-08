@@ -365,7 +365,9 @@ bool fmo_provision_load(wifi_config_t *config, bool *force)
     fmo_provision_get_endpoint(&s_endpoint);
     if (!s_profiles_lock) s_profiles_lock = xSemaphoreCreateMutex();
     if (!s_profiles_lock) return false;
+    xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
     fmo_wifi_profiles_init(&s_profiles);
+    xSemaphoreGive(s_profiles_lock);
     nvs_handle_t nvs;
     if (nvs_open("fmo_wifi", NVS_READONLY, &nvs) != ESP_OK) return false;
     uint8_t flag = 0;
@@ -375,6 +377,7 @@ bool fmo_provision_load(wifi_config_t *config, bool *force)
     size_t size = sizeof(profiles);
     esp_err_t err = nvs_get_blob(nvs, "profiles_v1", &profiles, &size);
     bool migrate = false;
+    xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
     if (err == ESP_OK && size == sizeof(profiles) && fmo_wifi_profiles_valid(&profiles)) {
         s_profiles = profiles;
     } else if (err == ESP_ERR_NVS_NOT_FOUND) {
@@ -389,9 +392,36 @@ bool fmo_provision_load(wifi_config_t *config, bool *force)
     /* Keep the legacy blob intact on migration failure. An empty new-format
      * list is authoritative, so deleting the last entry never resurrects it. */
     if (migrate) save_profiles(&s_profiles, false);
-    if (!s_profiles.count) return false;
-    to_wifi_config(config, &s_profiles.entries[s_profiles.preferred]);
+    bool saved = s_profiles.count != 0;
+    if (saved) to_wifi_config(config, &s_profiles.entries[s_profiles.preferred]);
+    xSemaphoreGive(s_profiles_lock);
+    return saved;
+}
+
+bool fmo_provision_saved_wifi(fmo_wifi_list_t *list)
+{
+    if (!list) return false;
+    if (!s_profiles_lock) { memset(list, 0, sizeof(*list)); return true; }
+    if (xSemaphoreTake(s_profiles_lock, 0) != pdTRUE) return false;
+    memset(list, 0, sizeof(*list));
+    list->count = s_profiles.count;
+    for (unsigned i = 0; i < list->count; ++i)
+        memcpy(list->names[i], s_profiles.entries[i].ssid, sizeof(list->names[i]));
+    xSemaphoreGive(s_profiles_lock);
     return true;
+}
+
+bool fmo_provision_config_saved(const char *ssid, wifi_config_t *config, uint8_t *tried)
+{
+    if (!ssid || !config || !tried || !s_profiles_lock) return false;
+    xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
+    int index = fmo_wifi_profiles_find(&s_profiles, ssid);
+    if (index >= 0) {
+        to_wifi_config(config, &s_profiles.entries[index]);
+        *tried = (uint8_t)(1u << index);
+    }
+    xSemaphoreGive(s_profiles_lock);
+    return index >= 0;
 }
 
 uint8_t fmo_provision_preferred_mask(void)
@@ -408,7 +438,9 @@ void fmo_provision_remember_connected(void)
     if (index < 0 || index == s_profiles.preferred) return;
     fmo_wifi_profiles_t updated = s_profiles;
     updated.preferred = (uint8_t)index;
+    xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
     save_profiles(&updated, false);
+    xSemaphoreGive(s_profiles_lock);
 }
 
 bool fmo_provision_next(wifi_config_t *config, uint8_t *tried)

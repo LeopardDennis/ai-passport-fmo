@@ -14,10 +14,17 @@ Keep each asset in the matching subdirectory and document its destination, namin
 [Noto CJK](https://github.com/notofonts/noto-cjk/tree/main/Sans/OTF/SimplifiedChinese),
 licensed under SIL OFL 1.1 (`fonts/OFL.txt`). `fonts/fmo_channel_font.c` is the
 derived 16px, 2bpp compressed LVGL font, covering ASCII, CJK punctuation and basic
-Han characters U+4E00–U+9FFF. Extension-block characters and emoji are not covered.
+Han characters U+4E00–U+9FFF, plus fullwidth ASCII forms U+FF01–U+FF5E
+(including fullwidth parentheses U+FF08/U+FF09). The additional symbol set covers
+curly quotation marks, dashes, ellipses, middle dots, reference/per-mille/prime marks,
+currency signs (yen, fullwidth yen, euro, pound), degree/Celsius/Fahrenheit signs,
+common math signs, circled numbers 1–20, Roman numerals I–X, arrows, stars and
+geometric shapes. The exact set is listed in the generated font's `--symbols`
+argument and checked by host tests. Extension-block characters and emoji are not covered.
 Only the generated C file is linked into the firmware; the original is retained
 for regeneration. Use `lv_font_conv@1.5.3` with the exact command in its header.
-LVGL font compression and large glyph offsets must be enabled. This font is for
+LVGL font compression must be enabled; the build-time compact conversion supports
+contiguous and sparse tiny cmaps with large glyph offsets disabled. This font is for
 channel names, not the original FMO callsign typeface.
 
 Store reusable font files and generated font sources in `fonts/`.

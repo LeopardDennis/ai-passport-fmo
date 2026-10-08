@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include "fmo_monitor_state.h"
+#include "fmo_wifi_profiles.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
@@ -35,6 +36,7 @@ typedef struct {
     fmo_monitor_state_t state;
     uint32_t speech_activity; // Retains a wake hint even if a short PTT ends before UI polling.
     char error[48];
+    char connected_ssid[33];
     char setup_ssid[33];
     char setup_password[17];
 } fmo_snapshot_t;
@@ -47,4 +49,7 @@ void fmo_network_request_refresh(void);
 void fmo_network_request_setup(void);
 
 void fmo_network_request_retry(void);
+/* Non-blocking device-menu APIs. */
+bool fmo_network_get_saved_wifi(fmo_wifi_list_t *list);
+bool fmo_network_request_wifi(const char *ssid);
 void fmo_network_cancel_setup(void);

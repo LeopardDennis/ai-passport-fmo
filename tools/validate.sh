@@ -64,6 +64,7 @@ run_static_checks() {
     python3 tests/test_compact_font.py
     python3 tests/test_fmo_storage.py
     python3 tests/test_fmo_display_runtime.py
+    python3 tests/test_fmo_wifi_selection.py
     python3 tests/test_fmo_provision_access.py
     python3 tests/test_fmo_provision_runtime.py
     python3 tests/test_fmo_network.py

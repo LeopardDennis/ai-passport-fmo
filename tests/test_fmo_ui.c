@@ -1,5 +1,7 @@
 /* Native LVGL smoke test and RGB565 framebuffer capture. Uses firmware UI. */
 #include "fmo_ui.h"
+#include "fmo_wifi_font.h"
+#include "src/widgets/label/lv_label_private.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -138,15 +140,68 @@ static int audio_bar_width(lv_display_t *display)
     return width;
 }
 
+/* Exercise the scaled font against every covered BMP glyph, including the
+ * compact font fallback, so rare SSIDs cannot silently render blank. */
+static void verify_wifi_font(void)
+{
+    const lv_font_t *small = fmo_wifi_font();
+    assert(small->line_height < fmo_channel_font.line_height);
+    static uint8_t data[32 * 32 + LV_DRAW_BUF_ALIGN];
+    unsigned covered = 0;
+    for (uint32_t code = 0x20; code <= 0xffff; ++code) {
+        lv_font_glyph_dsc_t original, glyph;
+        if (!lv_font_get_glyph_dsc(&fmo_channel_font, &original, code, 0) || original.is_placeholder)
+            continue;
+        ++covered;
+        assert(original.box_w <= 32 && original.box_h <= 32);
+        assert(lv_font_get_glyph_dsc(small, &glyph, code, 0) && !glyph.is_placeholder);
+        assert(glyph.box_w <= original.box_w && glyph.box_h <= original.box_h);
+        if (!original.box_w || !original.box_h) continue;
+        assert(glyph.box_w && glyph.box_h);
+        lv_draw_buf_t bitmap;
+        assert(lv_draw_buf_init(&bitmap, glyph.box_w, glyph.box_h, LV_COLOR_FORMAT_A8,
+                   LV_STRIDE_AUTO, lv_draw_buf_align(data, LV_COLOR_FORMAT_A8), 32 * 32) == LV_RESULT_OK);
+        assert(lv_font_get_glyph_bitmap(&glyph, &bitmap) == &bitmap);
+        bool ink = false;
+        for (unsigned y = 0; y < glyph.box_h; ++y)
+            for (unsigned x = 0; x < glyph.box_w; ++x)
+                ink |= bitmap.data[y * bitmap.header.stride + x] != 0;
+        assert(ink);
+    }
+    assert(covered > 21000);
+    lv_font_glyph_dsc_t original, glyph;
+    assert(lv_font_get_glyph_dsc(&fmo_channel_font, &original, 'H', 0));
+    assert(lv_font_get_glyph_dsc(small, &glyph, 'H', 0));
+    assert(glyph.box_h < original.box_h && glyph.adv_w < original.adv_w);
+}
+
 int main(int argc, char **argv)
 {
     lv_init();
+    if (argc == 1) verify_wifi_font();
     lv_font_glyph_dsc_t glyph;
     // Verify every existing CJK codepoint, including the compact font's fallback segment.
     for (uint32_t code = 0x4e00; code < 0x9ff0; ++code)
         assert(lv_font_get_glyph_dsc(&fmo_channel_font, &glyph, code, 0) && !glyph.is_placeholder);
     assert(lv_font_get_glyph_dsc(&fmo_channel_font, &glyph, 0x5409, 0) && !glyph.is_placeholder);
     assert(lv_font_get_glyph_dsc(&fmo_channel_font, &glyph, 0x7EE7, 0) && !glyph.is_placeholder);
+    /* Channel names may contain fullwidth parentheses and other fullwidth ASCII. */
+    for (uint32_t code = 0xff01; code <= 0xff5e; ++code)
+        assert(lv_font_get_glyph_dsc(&fmo_channel_font, &glyph, code, 0) && !glyph.is_placeholder);
+    /* Common punctuation, numbering, arrows and station-name decorations. */
+    static const uint32_t symbols[] = {
+        0x00a3, 0x00a5, 0x00b0, 0x00b1, 0x00b7, 0x00d7, 0x00f7, 0x2010, 0x2011, 0x2013,
+        0x2014, 0x2015, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2025, 0x2026, 0x2030,
+        0x2032, 0x2033, 0x203b, 0x20ac, 0x2103, 0x2109, 0x2160, 0x2161, 0x2162, 0x2163,
+        0x2164, 0x2165, 0x2166, 0x2167, 0x2168, 0x2169, 0x2190, 0x2191, 0x2192, 0x2193,
+        0x2194, 0x2195, 0x2196, 0x2197, 0x2198, 0x2199, 0x2248, 0x2260, 0x2264, 0x2265,
+        0x2460, 0x2461, 0x2462, 0x2463, 0x2464, 0x2465, 0x2466, 0x2467, 0x2468, 0x2469,
+        0x246a, 0x246b, 0x246c, 0x246d, 0x246e, 0x246f, 0x2470, 0x2471, 0x2472, 0x2473,
+        0x25a0, 0x25a1, 0x25b2, 0x25b3, 0x25bc, 0x25bd, 0x25c6, 0x25c7, 0x25cb, 0x25ce,
+        0x25cf, 0x2605, 0x2606, 0xffe5,
+    };
+    for (unsigned i = 0; i < sizeof(symbols) / sizeof(symbols[0]); ++i)
+        assert(lv_font_get_glyph_dsc(&fmo_channel_font, &glyph, symbols[i], 0) && !glyph.is_placeholder);
     lv_display_t *display = lv_display_create(240, 320);
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
     lv_display_set_buffers(display, buffer, NULL, sizeof(buffer), LV_DISPLAY_RENDER_MODE_PARTIAL);
@@ -389,10 +444,31 @@ int main(int argc, char **argv)
     assert(audio_bar_width(display)==0);
     state.wifi_connected=true;
     fmo_controls_observe_setup(&controls, true);
+    fmo_controls_key(&controls, FMO_KEY_OK);
     controls.setup_info = true;
     fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
     verify("ABCDEF012345", 0xF4F4F4);
     assert(find_text(lv_screen_active(), "192.168.9.1"));
+    /* Both short navigation and long back must expose the FMO-styled menu. */
+    const fmo_key_t back_keys[] = {FMO_KEY_UP, FMO_KEY_DOWN, FMO_KEY_BACK};
+    const char *menu_items[] = {"Wi-Fi 配网", "重连 Wi-Fi", "返回"};
+    for (unsigned k = 0; k < sizeof(back_keys) / sizeof(back_keys[0]); ++k) {
+        assert(fmo_controls_key(&controls, back_keys[k]) == FMO_ACTION_CANCEL);
+        fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
+        assert(find_text(lv_screen_active(), "网络设置"));
+        assert(find_text(lv_screen_active(), "配网热点已开启"));
+        for (unsigned row = 0; row < 3; ++row) {
+            lv_obj_t *item = find_text(lv_screen_active(), menu_items[row]);
+            assert(item);
+            assert(lv_color_eq(lv_obj_get_style_bg_color(lv_obj_get_parent(item), 0), lv_color_hex(0xFF8A00)));
+            fmo_controls_key(&controls, FMO_KEY_DOWN);
+            fmo_controls_observe_setup(&controls, true);
+            fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
+        }
+        fmo_controls_key(&controls, FMO_KEY_OK);
+        assert(controls.view == FMO_VIEW_SETUP);
+        fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
+    }
     /* Repeated view changes must release the QR canvas and overlay labels. */
     for (unsigned i = 0; i < 20; ++i) {
         controls.setup_info = false;
@@ -405,6 +481,7 @@ int main(int argc, char **argv)
         fmo_controls_observe_setup(&controls, false);
         fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
         fmo_controls_observe_setup(&controls, true);
+        fmo_controls_key(&controls, FMO_KEY_OK);
     }
     fmo_controls_observe_setup(&controls, false);
     const char *ssid = "", *password = "", *error = "";
@@ -418,15 +495,29 @@ int main(int argc, char **argv)
     if (argc > 1 && (!strcmp(argv[1], "setup") || !strcmp(argv[1], "setup_info"))) {
         ssid="FMO-Setup-TEST"; password="ABCDEF012345";
         fmo_controls_observe_setup(&controls, true);
+        fmo_controls_key(&controls, FMO_KEY_OK);
         controls.setup_info = !strcmp(argv[1], "setup_info");
     }
-    if (argc > 1 && !strcmp(argv[1], "network")) {
+    if (argc > 1 && (!strcmp(argv[1], "network") || !strcmp(argv[1], "network_retry") ||
+                     !strcmp(argv[1], "network_back"))) {
         controls.view = FMO_VIEW_NETWORK;
+        controls.selection = !strcmp(argv[1], "network_retry") ? 1 : !strcmp(argv[1], "network_back") ? 2 : 0;
+    }
+    if (argc > 1 && !strncmp(argv[1], "wifi_",5)) {
+        controls.view=FMO_VIEW_WIFI;controls.selection=2;
+        controls.wifi=(fmo_wifi_list_t){.count=5,.names={"Home_2.4G","Office_WiFi","Mobile_Hotspot","Cafe_2.4G","实验室（东区）网络"}};
+        strcpy(controls.connected_ssid,controls.wifi.names[1]);
+        if(!strcmp(argv[1],"wifi_current")) controls.selection=1;
+        if(!strcmp(argv[1],"wifi_empty")) controls.wifi.count=0;
+        if(!strcmp(argv[1],"wifi_offline")) state.wifi_connected=false;
+        if(!strcmp(argv[1],"wifi_long")) {controls.selection=4;strcpy(controls.wifi.names[4],"Very_Long_Saved_WiFi_Name_123456");}
     }
     if (argc > 1 && !strcmp(argv[1], "offline")) state.wifi_connected = state.channel_valid = false;
     if (argc > 1 && !strcmp(argv[1], "long")) {
         strcpy(state.history.entries[0].callsign,"BG5ESN/12345678");
     }
+    if (argc > 1 && !strcmp(argv[1], "symbols")) fmo_monitor_set_channel(&state, 42, "“洛阳”·①台—★");
+    if (argc > 1 && !strcmp(argv[1], "brackets")) fmo_monitor_set_channel(&state, 42, "面包圈（洛）");
     if (argc > 1 && !strcmp(argv[1], "rare")) fmo_monitor_set_channel(&state, 42, "龍龠龯");
     if (argc > 1 && !strcmp(argv[1], "long")) {
         fmo_monitor_apply_speaker(&state,"BG5ESN/12345678","PM01ABC1234",true,false, false,12000);
@@ -436,6 +527,42 @@ int main(int argc, char **argv)
     if (argc > 1 && (!strcmp(argv[1], "empty") || !strcmp(argv[1], "lan"))) memset(&state.history, 0, sizeof(state.history));
     if (argc > 1 && !strcmp(argv[1], "error")) error="NETWORK START FAILED";
     fmo_ui_render(&state, error, ssid, password, 82, 12000, false, &controls);
+    if (argc > 1 && !strcmp(argv[1], "brackets")) {
+        lv_obj_t *channel = find_text(lv_screen_active(), "面包圈（洛）");
+        assert(channel);
+        lv_point_t size;
+        lv_text_get_size(&size, lv_label_get_text(channel), &fmo_channel_font,
+                         0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        assert(size.x <= 200); /* Full name, including both parentheses, fits. */
+    }
+    if (argc > 1 && !strcmp(argv[1], "symbols"))
+        assert(find_text(lv_screen_active(), "“洛阳”·①台—★"));
+    if (controls.view==FMO_VIEW_WIFI) {
+        assert(find_text(lv_screen_active(),"选择 Wi-Fi"));
+        lv_obj_t *badge=find_text(lv_screen_active(),LV_SYMBOL_OK);assert(badge);
+        assert(!find_text(lv_screen_active(),"已连接"));
+        assert(lv_obj_has_flag(badge,LV_OBJ_FLAG_HIDDEN)==(!state.wifi_connected || !controls.wifi.count));
+        if(state.wifi_connected && controls.wifi.count) {
+            lv_area_t badge_area,name_area;
+            lv_obj_get_coords(badge,&badge_area);
+            lv_obj_get_coords(find_text(lv_screen_active(),controls.connected_ssid),&name_area);
+            assert(name_area.x2<badge_area.x1);
+        }
+        unsigned visible=0;
+        for(unsigned i=0;i<FMO_WIFI_PROFILE_MAX;++i) {
+            lv_obj_t *item=find_text(lv_screen_active(),controls.wifi.names[i]);
+            if(i<controls.wifi.count) {
+                assert(item);
+                assert(lv_obj_get_style_text_font(item, 0) == fmo_wifi_font());
+                ++visible;
+            }
+        }
+        assert(visible==controls.wifi.count);
+        if(controls.wifi.count) {
+            lv_obj_t *selected=find_text(lv_screen_active(),controls.wifi.names[controls.selection]);
+            assert(lv_color_eq(lv_obj_get_style_text_color(selected,0),lv_color_hex(0)));
+        }
+    }
     uint8_t preview_level = 0;
     if (meter_preview) preview_level = !strcmp(argv[1], "meter_low") ? 20 :
                                       !strcmp(argv[1], "meter_mid") ? 55 : 95;
@@ -450,6 +577,36 @@ int main(int argc, char **argv)
     lv_obj_update_layout(lv_screen_active());
     lv_refr_now(display);
     verify_clock_center();
+    if(controls.view==FMO_VIEW_WIFI && controls.wifi.count) {
+        unsigned y=40+72+30*controls.selection;
+        assert(pixels[y*240+13]==lv_color_to_u16(lv_color_hex(0xFF8A00)));
+        if (controls.wifi.count == FMO_WIFI_PROFILE_MAX) {
+            /* Compare visible status/footer ink with the outer row edges. */
+            int status_bottom = -1, footer_top = 320;
+            for (int yy = 78; yy < 112; ++yy) for (int x = 12; x < 228; ++x)
+                if (pixels[yy * 240 + x]) status_bottom = yy;
+            for (int yy = 260; yy < 290; ++yy) for (int x = 12; x < 228; ++x)
+                if (pixels[yy * 240 + x] && yy < footer_top) footer_top = yy;
+            assert(status_bottom >= 78 && footer_top < 290);
+            int above = 112 - status_bottom - 1;
+            int below = footer_top - 256 - 1;
+            assert(above == below && above >= 10);
+        }
+        for(unsigned row=0;row<controls.wifi.count;++row) {
+            int top=40+72+30*row,bottom=top+24,first=bottom,last=top;
+            uint16_t fill=pixels[top*240+13];
+            /* Check visible capital/CJK bodies, excluding trailing underscores. */
+            for(int yy=top;yy<=bottom;++yy) for(int x=20;x<34;++x)
+                if(pixels[yy*240+x]!=fill) {if(yy<first)first=yy;if(yy>last)last=yy;}
+            assert(first<=last && abs((first-top)-(bottom-last))<=2);
+            if(state.wifi_connected && !strcmp(controls.wifi.names[row],controls.connected_ssid)) {
+                first=bottom;last=top;
+                for(int yy=top;yy<=bottom;++yy) for(int x=204;x<220;++x)
+                    if(pixels[yy*240+x]!=fill) {if(yy<first)first=yy;if(yy>last)last=yy;}
+                assert(first<=last && abs((first-top)-(bottom-last))<=1);
+            }
+        }
+    }
     if (controls.view == FMO_VIEW_MONITOR) {
         verify_channel_center();
         verify_connection_gap();
@@ -465,6 +622,15 @@ int main(int argc, char **argv)
         lv_text_get_size(&size, footer, lv_obj_get_style_text_font(hint, 0),
                          0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         assert(size.x <= 216); /* Key actions must fit with no ellipsis. */
+    }
+    if (argc > 1 && !strcmp(argv[1],"wifi_long")) {
+        lv_obj_t *selected=find_text(lv_screen_active(),controls.wifi.names[controls.selection]);
+        lv_tick_inc(700);lv_timer_handler();lv_refr_now(display);
+        int32_t offset=((lv_label_t *)selected)->offset.x;
+        assert(offset!=0);
+        fmo_ui_render(&state,"",ssid,password,82,13000,false,&controls);
+        lv_refr_now(display);
+        assert(((lv_label_t *)selected)->offset.x==offset); // Periodic UI updates must not restart scrolling.
     }
     lv_mem_monitor_t memory;
     lv_mem_monitor(&memory);

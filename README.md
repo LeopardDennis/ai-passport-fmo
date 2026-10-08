@@ -112,7 +112,7 @@ ctest --test-dir /tmp/fmo-ui-preview --output-on-failure
 ```
 
 Other preview states are `idle`, `muted`, `lastheard`, `offline`, `setup` (QR),
-`setup_info` (credentials), `network`, `long`, `rare`, `error`, and
+`setup_info` (credentials), `network`, `wifi_saved` (saved Wi-Fi selection), `wifi_empty`, `wifi_current`, `wifi_offline`, `wifi_long`, `long`, `rare`, `error`, and
 `meter_low` / `meter_mid` / `meter_high` (audio strength).
 
 Up to five verified Wi-Fi networks are saved. The previous single-network format
@@ -133,7 +133,9 @@ The new LAN must also provide access to FMO. Only a change of preferred network
 is written to NVS, not every reconnect. WPA2-or-newer personal networks and open
 networks are supported, not enterprise authentication.
 
-On first boot, a credential-free build starts a protected hotspot. Join the
+On first boot, a credential-free build starts a protected hotspot and displays
+the three-action network menu. Select **Wi-Fi setup** with UP/DOWN and click OK
+to open the connection QR. Join the
 `FMO-Setup-XXXX` network using the random password shown on the Passport screen.
 Keep the phone connected even if it reports no Internet, then open
 `http://192.168.9.1` manually. Choose a nearby 2.4 GHz Wi-Fi network or type a
@@ -157,18 +159,32 @@ path or event compatibility; the monitor screen reports the final FMO status.
 A check neither saves new Wi-Fi credentials nor changes the saved FMO address.
 
 Network/setup startup failures retain the worker and retry every five seconds;
-the network menu's retry interrupts the wait. Partial initialization unregisters
+a network-selection request interrupts the wait. Partial initialization unregisters
 event handlers and releases Wi-Fi resources, and recovery clears the error.
 Installation cleanup failures continue retrying without enabling networking;
 identity and Recovery remain protected.
 
 Long-press **OK** to open the network menu. Use UP/DOWN to select **Wi-Fi setup**,
-**Retry Wi-Fi**, or **Return to monitor**, then click OK. Long OK returns. Setup
-restarts into the QR screen; it remains available when the old router is offline.
-Retry immediately tries saved networks, without disconnecting a healthy link.
+**Retry Wi-Fi**, or **Return**, then click OK. Long OK returns. Setup
+restarts into the network menu; click OK on Wi-Fi setup to open the QR screen.
+It remains available when the old router is offline.
+Retry opens a list of up to five saved Wi-Fi names. Use UP/DOWN to select a name
+and click OK to connect; long OK returns to the network menu. The actual connected
+network is marked with a small check on the right, and the selected long name scrolls. An empty list
+cannot start a connection. Selecting the currently connected network keeps its
+healthy link. Selecting another network closes old FMO connections and restarts
+station association before trying the chosen saved credentials. A failed attempt
+falls back to the normal automatic profile retry after 25 seconds. Network names
+are resolved again by the worker, so deleting or reordering profiles on the web
+page cannot connect a different entry accidentally. Only a successful connection
+changes the preferred network; Wi-Fi passwords never enter the UI state.
 During setup, click OK to switch between the connection QR and the hotspot name
 and password. Scan with your phone camera to join, or connect manually using the
-displayed credentials. Long OK cancels setup, closes the hotspot, and restores
+displayed credentials. Click UP/DOWN or long-press OK to cancel setup and return
+to the network menu. Confirming a saved network while the hotspot is active exits setup
+before connecting; Return or long OK in the menu also closes
+the hotspot. Repeated setup snapshots preserve the selected menu row. Cancellation
+closes the hotspot and restores
 the current saved network list without persisting an unverified password or
 restoring networks deleted on the web page. Startup failures retry automatically and remain accessible from the network menu. There is no automatic captive-portal popup or assumption
 of shared credentials with other Passport firmware. The setup page is reachable
@@ -215,7 +231,7 @@ and cannot reliably identify a reinstall of the same binary.
 - **OK**: toggle audio on/off while preserving the selected volume.
 - **Long UP**: refresh the current FMO channel immediately (the five-second boot Recovery hook is unchanged).
 - **Long OK**: open the network menu; UP/DOWN selects, click OK executes, long OK returns.
-- **Setup click OK**: switch QR/credentials; long OK cancels to the network menu.
+- **Setup click OK**: switch QR/credentials; UP/DOWN or long OK cancels to the network menu.
 
 ## Idle display and wake-up
 

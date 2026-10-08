@@ -6,6 +6,20 @@
 
 ## Unreleased
 
+- Reduce saved Wi-Fi names from 16 px to 14 px, preserving the full existing glyph set through bounded glyph resampling. Balance the first/last row gaps against the status and footer while retaining five networks and the connected check mark.
+
+- Center saved Wi-Fi name letter bodies vertically, without letting underscores or descenders raise the rest of the text. Replace the connected-network wording with a compact check mark, retaining the FMO palette and a consistent name column.
+
+- Increase the gap between saved-network status and the first Wi-Fi row; keep five rows clear of the footer in the existing FMO layout.
+
+- Make Retry Wi-Fi open a five-entry saved-network selector in the FMO black/orange style. Mark the actual connected SSID, scroll the selected long name, and label the menu exit Return. Resolve selections by name in the network worker, preserve a healthy selected link, stop old DHCP callbacks before switching, and retain automatic fallback after a failed attempt. Test empty/deleted/reordered profiles, switching failures, real input routing and framebuffer/memory behavior.
+
+- Open device setup at the three-action FMO network menu, preserve its selection during repeated setup updates, and make QR/info views return to the menu with UP/DOWN or long OK. Retry Wi-Fi releases an active setup loop before trying saved networks; return/back closes the hotspot. Retain the black/orange FMO palette and verify production input routing, selection rendering and setup retry dispatch.
+
+- Add common Chinese punctuation and station-name symbols: curly quotes, dashes, ellipses, middle dots, currency/unit/math signs, circled numbers 1–20, Roman numerals I–X, arrows, stars and geometric shapes. Normalize sparse tiny font maps without filling Unicode gaps; verify symbol coverage and native channel rendering.
+
+- Fix missing fullwidth parentheses in channel names by adding U+FF01–U+FF5E glyphs from the existing Noto font. Preserve channel text and existing glyph metrics/bitmaps; add compact-font coverage and native UI regression checks for a Chinese name with fullwidth parentheses.
+
 - Reduce PCM critical-section work: reset metadata without clearing the 24 KiB backing array, use contiguous little-endian ring copies with odd-fragment handling, batch overflow accounting and pad only missing output samples. Preserve complete-message publication, buffering and mute/disconnect cleanup semantics. Recompute UI glyph layout only when displayed text/font mode changes, format history dates only when entries change and update the clock by minute; reset view caches on recreation. Add ring-wrap/overflow/reset and native UI redraw/cache regressions. Device timing and power improvements remain unmeasured.
 
 - Use playback-only I2S TX and ES8311 DAC/OUT mode for FMO audio, without allocating RX DMA, connecting DIN or configuring microphone gain. Keep the existing full-duplex BSP entry point for recording applications; reject mode changes after initialization and reads in playback-only mode. Audio buffering, Wi-Fi policy and output DMA timing are unchanged. Physical playback, memory savings and current consumption still require device validation.

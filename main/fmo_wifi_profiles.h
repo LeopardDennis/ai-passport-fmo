@@ -2,6 +2,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #define FMO_WIFI_PROFILE_MAX 5
+/* Public menu data contains network names only, never passwords. */
+typedef struct { uint8_t count; char names[FMO_WIFI_PROFILE_MAX][33]; } fmo_wifi_list_t;
 typedef struct { char ssid[33]; char password[64]; } fmo_wifi_credential_t;
 typedef struct {
     uint8_t version;
