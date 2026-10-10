@@ -171,8 +171,9 @@ It remains available when the old router is offline.
 Retry opens a list of up to five saved Wi-Fi names. Use UP/DOWN to select a name
 and click OK to connect; long OK returns to the network menu. The actual connected
 network is marked with a small check on the right, and the selected long name scrolls. An empty list
-cannot start a connection. Selecting the currently connected network keeps its
-healthy link. Selecting another network closes old FMO connections and restarts
+cannot start a connection. Selecting the currently connected network keeps Wi-Fi
+and immediately retries failed FMO connections, leaving healthy FMO links intact.
+Selecting another network closes old FMO connections and restarts
 station association before trying the chosen saved credentials. A failed attempt
 falls back to the normal automatic profile retry after 25 seconds. Network names
 are resolved again by the worker, so deleting or reordering profiles on the web
@@ -267,6 +268,16 @@ Battery polling pauses while the screen is off. This is display power saving,
 not MCU deep sleep; battery-life improvements require measurement on hardware.
 
 ## FMO compatibility
+
+Every boot automatically joins saved Wi-Fi and connects to FMO. Once Wi-Fi is
+online, an event link or channel confirmation that remains unavailable for
+30 seconds triggers a DNS cache refresh and replacement of only the failed
+metadata clients. Failed attempts repeat at that interval without menu input.
+Healthy connections and audio keep running; this does not switch Wi-Fi. Setup
+and intentional station-switch waits suppress recovery. An ambiguous switch
+only recovers the query connection to check the actual station, never resending
+the switch command. Recovery cannot correct a wrong FMO address or provide
+connectivity across an isolated LAN.
 
 The implementation follows the interface used by current community FMO web
 clients. FMO firmware variants may change local event field names or paths. If

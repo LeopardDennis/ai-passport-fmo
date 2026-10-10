@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Add coordinator recovery for FMO connections that remain unavailable after power-on or during operation. After 30 seconds without an event link or confirmed channel, replace only the failed metadata clients and refresh DNS while retaining Wi-Fi and audio. Selecting the connected Wi-Fi also retries failed FMO links immediately. Preserve station-switch ownership and reconcile ambiguous results without resending commands. Host regressions cover startup, repeated failures, healthy-link isolation, setup/offline pauses and manual retry; physical power-cycle recovery still requires device validation.
+
 - Add on-device station switching: long UP opens a six-row paged list using the existing fonts, colors and single-line footer; OK switches directly and long OK returns. Keep audio playing while browsing, preserve volume/mute settings, mark the current station and scroll selected long names. Serialize station requests with channel polling, wait for audio shutdown before sending, clear old metadata, and confirm the actual UID before resuming. Reconcile failed, timed-out or disconnected switches without automatic resends. Cover paging, repeated input, late replies, partial sends, audio shutdown/restart and native UI allocation/layout under the existing 24 KiB pool. Physical-device switching and playback remain unverified.
 
 - Reduce saved Wi-Fi names from 16 px to 14 px, preserving the full existing glyph set through bounded glyph resampling. Balance the first/last row gaps against the status and footer while retaining five networks and the connected check mark.

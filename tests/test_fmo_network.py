@@ -33,7 +33,7 @@ def run():
     header = (ROOT / "main/fmo_network.h").read_text()
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
-        "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_station_list", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link"))
+        "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_station_list", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
     functions += "\n" + source[source.index("void fmo_network_request_retry(void)"):source.index("bool fmo_network_get_saved_wifi(")]
     preamble = r'''
 #include "fmo_monitor_state.h"
@@ -65,6 +65,7 @@ static fmo_snapshot_t s_snapshot, published;
 static int s_state_lock, s_update_queue, locked, refreshes;
 static bool s_query_pending;
 static bool s_station_draining, s_station_prepared;
+static fmo_link_recovery_t s_events_recovery, s_control_recovery;
 static uint32_t s_speaker_revision, s_query_revision;
 static uint64_t clock_ms = 10000, s_query_ms;
 static bool s_clock_initialized, s_clock_online;
@@ -122,11 +123,17 @@ static void esp_netif_destroy_default_wifi(int *station){assert(station==&statio
 static void xEventGroupClearBits(int bits,int mask){(void)bits;assert(mask==15);}
 static void post_link(fmo_update_type_t type, bool connected);
 static unsigned socket_stops;
+static unsigned dns_clears;
+static bool late_connect_on_stop;
+static void clear_dns_cache(void *unused) { (void)unused; assert(!locked); ++dns_clears; }
+static int tcpip_callback_wait(void (*callback)(void *), void *arg) { callback(arg); return 0; }
 static void stop_socket(fmo_socket_t *socket) {
     assert(!locked);
     if (!socket->client) return;
     ++socket_stops; socket->client=0;
     post_link(socket->kind==FMO_SOCKET_EVENTS ? FMO_UPDATE_EVENTS_LINK : FMO_UPDATE_CONTROL_LINK,false);
+    if (late_connect_on_stop)
+        post_link(socket->kind==FMO_SOCKET_EVENTS ? FMO_UPDATE_EVENTS_LINK : FMO_UPDATE_CONTROL_LINK,true);
 }
 static char last_error[48];
 static int fmo_storage_prepare(void) {
@@ -161,6 +168,84 @@ static void query(void) { s_query_pending = true; s_query_revision = s_speaker_r
 #define CHANNEL42 "{\"type\":\"station\",\"subType\":\"getCurrentResponse\",\"data\":{\"uid\":42,\"name\":\"安吉FMO中继\"}}"
 #define CHANNEL43 "{\"type\":\"station\",\"subType\":\"getCurrentResponse\",\"data\":{\"uid\":43,\"name\":\"上海\"}}"
 #define START "{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"BG5ESN\",\"isSpeaking\":true,\"grid\":\"PM01\"}}"
+static void test_metadata_recovery(void) {
+    memset(&s_snapshot,0,sizeof(s_snapshot));
+    memset(&s_events_recovery,0,sizeof(s_events_recovery));
+    memset(&s_control_recovery,0,sizeof(s_control_recovery));
+    atomic_store(&s_setup_active,false);
+    audio_suspended=false; s_query_pending=false;
+    int before_sends=sends;
+    socket_stops=dns_clears=0;
+    // Cold boot: Wi-Fi succeeds, both client handles exist, neither connects.
+    // No user input or Wi-Fi disconnect is needed to trigger recovery.
+    clock_ms=0; s_snapshot.state.wifi_connected=true;
+    s_events_socket.client=2; s_control_socket.client=1;
+    recover_metadata(false);
+    clock_ms=FMO_LINK_RECOVERY_MS-1; recover_metadata(false);
+    assert(!socket_stops && !dns_clears);
+    clock_ms++; late_connect_on_stop=true; recover_metadata(false);
+    late_connect_on_stop=false;
+    assert(socket_stops==2 && dns_clears==1);
+    assert(!s_events_socket.client && !s_control_socket.client);
+    assert(s_snapshot.state.wifi_connected && !s_snapshot.state.events_connected &&
+           !s_snapshot.state.control_connected && !s_query_pending);
+    assert(!audio_suspended && sends==before_sends);
+    // New clients also fail: enforce a fresh full cooldown instead of a loop.
+    s_events_socket.client=2; s_control_socket.client=1;
+    recover_metadata(false); assert(socket_stops==2);
+    clock_ms=2*FMO_LINK_RECOVERY_MS-1; recover_metadata(false); assert(socket_stops==2);
+    clock_ms++; recover_metadata(false); assert(socket_stops==4 && dns_clears==2);
+
+    // A fully recovered session stays up indefinitely, including manual retry.
+    s_events_socket.client=2; s_control_socket.client=1;
+    post_link(FMO_UPDATE_EVENTS_LINK,true); post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query(); parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    recover_metadata(false); clock_ms+=10*FMO_LINK_RECOVERY_MS;
+    recover_metadata(false); recover_metadata(true);
+    assert(socket_stops==4 && dns_clears==2);
+
+    // Control/confirmation outage alone must preserve live callsigns and audio.
+    parse_fmo_message(FMO_SOCKET_EVENTS,START);
+    post_link(FMO_UPDATE_CONTROL_LINK,false);
+    recover_metadata(false); clock_ms+=FMO_LINK_RECOVERY_MS;
+    recover_metadata(false);
+    assert(socket_stops==5 && dns_clears==3 && s_events_socket.client==2);
+    assert(s_snapshot.state.speaking && !audio_suspended);
+    s_control_socket.client=1; post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query(); parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42); recover_metadata(false);
+    // Events alone fail: manual recovery does not tear down a healthy control.
+    s_snapshot.state.events_connected=false;
+    recover_metadata(true);
+    assert(socket_stops==6 && dns_clears==4 && s_control_socket.client==1);
+    assert(!audio_suspended);
+
+    // Offline/setup time never consumes the next Wi-Fi session's grace period.
+    s_snapshot.state.wifi_connected=false; recover_metadata(false);
+    clock_ms+=FMO_LINK_RECOVERY_MS; recover_metadata(true); assert(dns_clears==4);
+    s_snapshot.state.wifi_connected=true; atomic_store(&s_setup_active,true);
+    recover_metadata(true); assert(dns_clears==4);
+    atomic_store(&s_setup_active,false); recover_metadata(false);
+    assert(dns_clears==4);
+
+    // Intentional station pauses must not be mistaken for broken transports.
+    s_events_socket.client=2; s_control_socket.client=1;
+    s_snapshot.stations.audio_paused=true;
+    s_snapshot.stations.request=FMO_STATION_SET_WAIT;
+    recover_metadata(true); clock_ms+=FMO_LINK_RECOVERY_MS; recover_metadata(false);
+    assert(dns_clears==4);
+    // After an ambiguous switch, recover only control and never resend the set.
+    s_snapshot.stations.request=FMO_STATION_RECONCILE;
+    s_snapshot.stations.target_uid=43;
+    recover_metadata(false); clock_ms+=FMO_LINK_RECOVERY_MS; recover_metadata(false);
+    assert(dns_clears==5 && s_events_socket.client==2 && !s_control_socket.client);
+    assert(s_snapshot.stations.audio_paused && s_snapshot.stations.target_uid==43 &&
+           s_snapshot.stations.request==FMO_STATION_RECONCILE && sends==before_sends);
+
+    fmo_link_recovery_t rollback={.waiting=true,.since_ms=90000};
+    assert(!fmo_link_recovery_due(&rollback,true,false,false,1));
+    assert(fmo_link_recovery_due(&rollback,true,false,false,1+FMO_LINK_RECOVERY_MS));
+    puts("FMO metadata recovery: PASS (cold boot, retries, healthy links, manual retry, offline/setup, station reconciliation)");
+}
 int main(void) {
     fmo_update_t link = {.type=FMO_UPDATE_WIFI, .connected=true};
     strcpy(link.text,"actual-wifi");post_update(&link);assert(!strcmp(published.connected_ssid,"actual-wifi")); link.type=FMO_UPDATE_EVENTS_LINK; post_update(&link);
@@ -593,6 +678,7 @@ int main(void) {
     assert(!prepare_station_work() && !s_control_socket.client);
     parse_fmo_message(FMO_SOCKET_CONTROL,list);
     assert(s_snapshot.stations.status==FMO_STATIONS_LOAD_FAILED && !s_snapshot.stations.count);
+    test_metadata_recovery();
     puts("FMO network parser: PASS (cross-server flags/color lifecycle, recent-three history/sorting/isolation, large history receive/fragmentation, local profile exclusion, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");
 }
 '''

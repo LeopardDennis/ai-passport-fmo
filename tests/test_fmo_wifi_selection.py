@@ -51,6 +51,8 @@ static int locks[3],fail_lock,notices,stop_sockets,dns_clears,connects,start_cou
 static bool config_set;
 static wifi_config_t chosen;
 static char error[48];
+static unsigned metadata_retries;
+static void recover_metadata(bool manual){assert(manual);++metadata_retries;}
 static uint64_t now_ms(void){return 10000;}
 static int xSemaphoreTake(int lock,int wait){assert(lock>0 && lock<3);if(fail_lock==lock && wait==0)return 0;assert(!locks[lock]);locks[lock]=1;return pdTRUE;}
 static void xSemaphoreGive(int lock){assert(locks[lock]);locks[lock]=0;}
@@ -96,6 +98,7 @@ int main(void){
     assert(switch_saved_wifi() && connects==1); // One request is consumed once.
     strcpy(s_snapshot.connected_ssid,"wifi-2");s_snapshot.state.wifi_connected=true;bits=FMO_WIFI_READY_BIT;
     assert(fmo_network_request_wifi("wifi-2") && switch_saved_wifi() && connects==1 && stop_count==1); // Keep the healthy selected link.
+    assert(metadata_retries==1); // Retry FMO even when Wi-Fi itself is already connected.
     assert(fmo_network_request_wifi("wifi-3"));
     assert(fmo_wifi_profiles_remove(&s_profiles,"wifi-0")); // Index shifts after the menu was shown.
     assert(switch_saved_wifi() && !memcmp(chosen.sta.ssid,"wifi-3",6) && s_tried_profiles==4 && connects==2);

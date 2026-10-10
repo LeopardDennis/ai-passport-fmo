@@ -74,6 +74,7 @@ static esp_event_handler_instance_t s_wifi_handler;
 static esp_event_handler_instance_t s_ip_handler;
 static fmo_socket_t s_events_socket = { .kind = FMO_SOCKET_EVENTS };
 static fmo_socket_t s_control_socket = { .kind = FMO_SOCKET_CONTROL };
+static fmo_link_recovery_t s_events_recovery, s_control_recovery;
 
 /* Serialize producers before publishing a one-slot, overwriteable snapshot.
  * A slow UI cannot drop the final transition or restore an older snapshot. */
@@ -751,6 +752,39 @@ static void clear_dns_cache(void *unused)
     dns_clear_cache();
 }
 
+/* Runs only in the coordinator. Failed first connections also need recovery:
+ * a non-NULL client does not mean its transport ever became usable. Joining
+ * old callbacks before publishing link loss prevents stale confirmations.
+ * Keep Wi-Fi and the independently owned audio stream running. */
+static void recover_metadata(bool manual)
+{
+    uint64_t now = now_ms();
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    const fmo_monitor_state_t *state = &s_snapshot.state;
+    const fmo_stations_t *stations = &s_snapshot.stations;
+    bool online = state->wifi_connected && !atomic_load(&s_setup_active);
+    bool control_allowed = stations->request == FMO_STATION_NONE ||
+                           stations->request == FMO_STATION_RECONCILE;
+    bool events = fmo_link_recovery_due(&s_events_recovery,
+        online && !stations->audio_paused, state->events_connected, manual, now);
+    bool control = fmo_link_recovery_due(&s_control_recovery,
+        online && control_allowed, state->control_connected && state->channel_valid, manual, now);
+    xSemaphoreGive(s_state_lock);
+    if (!events && !control) return;
+
+    ESP_LOGW(TAG, "FMO metadata recovery: reason=%s events=%d control=%d; refreshing DNS",
+             manual ? "manual retry" : "connection deadline", events, control);
+    if (events) {
+        stop_socket(&s_events_socket);
+        post_link(FMO_UPDATE_EVENTS_LINK, false);
+    }
+    if (control) {
+        stop_socket(&s_control_socket);
+        post_link(FMO_UPDATE_CONTROL_LINK, false);
+    }
+    tcpip_callback_wait(clear_dns_cache, NULL);
+}
+
 static bool switch_saved_wifi(void)
 {
     char ssid[33];
@@ -761,7 +795,11 @@ static bool switch_saved_wifi(void)
     bool already_connected = s_snapshot.state.wifi_connected &&
                              !strcmp(ssid, s_snapshot.connected_ssid);
     xSemaphoreGive(s_state_lock);
-    if (already_connected) { post_error(""); return true; }
+    if (already_connected) {
+        recover_metadata(true);
+        post_error("");
+        return true;
+    }
     wifi_config_t config = {0};
     uint8_t tried = 0;
     if (!fmo_provision_config_saved(ssid, &config, &tried)) {
@@ -902,6 +940,7 @@ static void network_task(void *argument)
                 tcpip_callback_wait(clear_dns_cache, NULL);
         }
         retry_wifi();
+        recover_metadata(false);
         if (xEventGroupGetBits(s_wifi_bits) & FMO_WIFI_READY_BIT) {
             update_clock_service(true);
             if (!stations_paused && !s_events_socket.client) {
