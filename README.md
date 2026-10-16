@@ -93,7 +93,7 @@ logs report connection changes and aggregate received bytes, discarded samples
 and invalid messages, committed/pending samples, output/source samples and
 maximum codec-write duration and buffer-wait time every 30 seconds, without conversation content.
 Audio continues while the LCD sleeps. No microphone capture, recording or
-transmit/PTT commands are added. The footer uses one centered row with the audio percentage and the long-UP station-list hint. It displays the selected volume while audio is enabled and 0% while muted; clicking OK toggles sound and holding OK opens the setup/network menu.
+transmit/PTT commands are added. The connection row shows status on the left and a right-aligned audio percentage on the right, aligned with the channel panel edge. It displays the selected volume while audio is enabled and 0% while muted. The single-line footer uses a 14 px font to explicitly name long UP for station switching and long confirm for network settings. The network menu, Wi-Fi list and station list share a footer describing UP/DOWN selection and long-confirm return. All page footers use the same 14 px font, one centered line and consistent Chinese names for the confirm key; empty Wi-Fi lists and station loading/retry states show applicable actions. Clicking OK still toggles sound.
 With no active speech, the middle shows the last-heard callsign in bold white;
 before the first contact it shows `--` and a waiting-for-speech hint.
 Runtime sound settings reset on reboot; `CONFIG_FMO_VOLUME` sets initial volume.
@@ -165,10 +165,10 @@ Installation cleanup failures continue retrying without enabling networking;
 identity and Recovery remain protected.
 
 Long-press **OK** to open the network menu. Use UP/DOWN to select **Wi-Fi setup**,
-**Retry Wi-Fi**, or **Return**, then click OK. Long OK returns. Setup
+**Select Wi-Fi**, or **Return**, then click OK. Long OK returns. Setup
 restarts into the network menu; click OK on Wi-Fi setup to open the QR screen.
 It remains available when the old router is offline.
-Retry opens a list of up to five saved Wi-Fi names. Use UP/DOWN to select a name
+Select Wi-Fi opens a list of up to five saved Wi-Fi names. Use UP/DOWN to select a name
 and click OK to connect; long OK returns to the network menu. The actual connected
 network is marked with a small check on the right, and the selected long name scrolls. An empty list
 cannot start a connection. Selecting the currently connected network keeps Wi-Fi

@@ -99,6 +99,28 @@ static void verify_connection_gap(void)
     assert(62 - last - 1 >= 10); /* Visible gap before the channel strip. */
 }
 
+static void verify_audio_row(const char *link, unsigned volume)
+{
+    char value[32];
+    snprintf(value,sizeof(value),"音频：%u%%",volume);
+    lv_obj_t *audio=find_text(lv_screen_active(),value);
+    lv_obj_t *status=find_text(lv_screen_active(),link);
+    assert(audio && status);
+    lv_obj_update_layout(lv_screen_active());
+    lv_area_t a,b;
+    lv_obj_get_coords(audio,&a);lv_obj_get_coords(status,&b);
+    assert(a.x2==227 && b.x2+8<a.x1);
+    assert(lv_obj_get_style_text_align(audio,0)==LV_TEXT_ALIGN_RIGHT);
+    lv_obj_t *labels[]={audio,status};
+    for(unsigned i=0;i<2;++i) {
+        lv_point_t size;
+        lv_text_get_size(&size,lv_label_get_text(labels[i]),lv_obj_get_style_text_font(labels[i],0),
+                         0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        assert(size.x<=lv_obj_get_width(labels[i]));
+        assert(lv_obj_get_height(labels[i])==lv_obj_get_style_text_font(labels[i],0)->line_height);
+    }
+}
+
 static void verify_callsign_center(int top)
 {
     int first = top + 32, last = top - 1;
@@ -243,7 +265,7 @@ int main(int argc, char **argv)
     fmo_monitor_set_channel(&state, 42, "安吉FMO中继");
     fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
     assert(find_text(lv_screen_active(), "正在通联"));
-    assert(find_text(lv_screen_active(), "音频: 50%  长按上: 台站"));
+    assert(find_text(lv_screen_active(), "音频：50%"));
     lv_refr_now(display);
     flushes = 0;
     for (unsigned i = 0; i < 120; ++i) {
@@ -295,7 +317,7 @@ int main(int argc, char **argv)
     assert(audio_bar_width(display) == 108);
     controls.audio_enabled=false;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
-    assert(find_text(lv_screen_active(), "音频: 0%  长按上: 台站"));
+    assert(find_text(lv_screen_active(), "音频：0%"));
     fmo_ui_set_audio_level(100, 12780);
     assert(audio_bar_width(display) == 0);
     controls.audio_enabled=true; controls.volume=0;
@@ -304,16 +326,26 @@ int main(int argc, char **argv)
     assert(audio_bar_width(display) == 0);
     controls.volume=100; controls.audio_enabled=true;
     fmo_ui_render(&state,"","","",82,12000,true,&controls);
-    assert(find_text(lv_screen_active(), "音频: 100%  长按上: 台站"));
+    assert(find_text(lv_screen_active(), "音频：100%"));
     lv_obj_t *switch_link = find_text(lv_screen_active(), "已切换到新台站");
     assert(switch_link);
     lv_point_t hint_size;
-    lv_text_get_size(&hint_size, "音频: 100%  长按上: 台站", &fmo_channel_font,
+    lv_text_get_size(&hint_size, "音频：100%", fmo_wifi_font(),
                      0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    assert(hint_size.x <= 216);
+    assert(hint_size.x <= 88);
     lv_text_get_size(&hint_size, lv_label_get_text(switch_link), &fmo_channel_font,
                      0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    assert(hint_size.x <= 216);
+    assert(hint_size.x <= 120);
+    verify_audio_row("已切换到新台站",100);
+    controls.station_already_current=true;
+    fmo_ui_render(&state,"","","",82,12000,true,&controls);
+    verify_audio_row("已是当前台站",100);
+    controls.station_already_current=false;
+    for(unsigned volume=0;volume<=100;volume+=10) {
+        controls.volume=volume;
+        fmo_ui_render(&state,"","","",82,12000,false,&controls);
+        verify_audio_row("FMO 已连接",volume);
+    }
     controls.volume=50;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
     assert(find_text(lv_screen_active(), "安吉FMO中继"));
@@ -452,7 +484,7 @@ int main(int argc, char **argv)
     assert(find_text(lv_screen_active(), "192.168.9.1"));
     /* Both short navigation and long back must expose the FMO-styled menu. */
     const fmo_key_t back_keys[] = {FMO_KEY_UP, FMO_KEY_DOWN, FMO_KEY_BACK};
-    const char *menu_items[] = {"Wi-Fi 配网", "重连 Wi-Fi", "返回"};
+    const char *menu_items[] = {"Wi-Fi 配网", "选择 Wi-Fi", "返回"};
     for (unsigned k = 0; k < sizeof(back_keys) / sizeof(back_keys[0]); ++k) {
         assert(fmo_controls_key(&controls, back_keys[k]) == FMO_ACTION_CANCEL);
         fmo_ui_render(&state, "", "FMO-Setup-TEST", "ABCDEF012345", 82, 12000, false, &controls);
@@ -519,6 +551,10 @@ int main(int argc, char **argv)
             controls.stations.audio_paused=true;
         }
         if (!strcmp(argv[1],"stations_error")) controls.stations.status=FMO_STATIONS_LOAD_FAILED;
+        if (!strcmp(argv[1],"stations_empty")) {
+            controls.stations.status=FMO_STATIONS_EMPTY;
+            controls.stations.count=0;
+        }
         if (!strcmp(argv[1],"stations_loading")) {
             controls.stations.status=FMO_STATIONS_LOADING;
             controls.stations.count=0;
@@ -553,6 +589,10 @@ int main(int argc, char **argv)
         fmo_monitor_apply_speaker(&state,"BG5ESN/12345678","PM01ABC1234",true,false, false,12000);
     }
     if (argc > 1 && !strcmp(argv[1], "muted")) controls.audio_enabled=false;
+    if (argc > 1 && !strcmp(argv[1], "volume100")) controls.volume=100;
+    if (argc > 1 && !strcmp(argv[1], "fmo_offline")) state.events_connected=false;
+    if (argc > 1 && !strcmp(argv[1], "channel_pending")) state.channel_valid=false;
+    if (argc > 1 && !strcmp(argv[1], "monitor_switch")) controls.stations.audio_paused=true;
     if (argc > 1 && (!strcmp(argv[1], "idle") || !strcmp(argv[1], "empty"))) state.last_speaker[0]=0;
     if (argc > 1 && (!strcmp(argv[1], "empty") || !strcmp(argv[1], "lan"))) memset(&state.history, 0, sizeof(state.history));
     if (argc > 1 && !strcmp(argv[1], "error")) error="NETWORK START FAILED";
@@ -593,6 +633,18 @@ int main(int argc, char **argv)
             assert(lv_color_eq(lv_obj_get_style_text_color(selected,0),lv_color_hex(0)));
         }
     }
+    const char *overlay_hint = controls.view==FMO_VIEW_NETWORK ? "上/下: 选择 长按确认: 返回" :
+        controls.view==FMO_VIEW_WIFI ? (controls.wifi.count ? "上/下: 选择 长按确认: 返回" : "请先配网 长按确认返回") :
+        controls.view==FMO_VIEW_SETUP ? (controls.setup_info ? "确认查看二维码 长按返回" : "确认查看密码 长按返回") : NULL;
+    if(overlay_hint) {
+        lv_obj_t *hint=find_text(lv_screen_active(),overlay_hint);assert(hint);
+        lv_point_t size;
+        lv_text_get_size(&size,overlay_hint,fmo_wifi_font(),0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        assert(size.x<=216);
+        lv_obj_update_layout(lv_screen_active());
+        assert(lv_obj_get_style_text_font(hint,0)==fmo_wifi_font());
+        assert(lv_obj_get_height(hint)==fmo_wifi_font()->line_height);
+    }
     uint8_t preview_level = 0;
     if (meter_preview) preview_level = !strcmp(argv[1], "meter_low") ? 20 :
                                       !strcmp(argv[1], "meter_mid") ? 55 : 95;
@@ -615,12 +667,12 @@ int main(int argc, char **argv)
             int status_bottom = -1, footer_top = 320;
             for (int yy = 78; yy < 112; ++yy) for (int x = 12; x < 228; ++x)
                 if (pixels[yy * 240 + x]) status_bottom = yy;
-            for (int yy = 260; yy < 290; ++yy) for (int x = 12; x < 228; ++x)
+            for (int yy = 294; yy < 312; ++yy) for (int x = 12; x < 228; ++x)
                 if (pixels[yy * 240 + x] && yy < footer_top) footer_top = yy;
-            assert(status_bottom >= 78 && footer_top < 290);
+            assert(status_bottom >= 78 && footer_top < 312);
             int above = 112 - status_bottom - 1;
             int below = footer_top - 256 - 1;
-            assert(above == below && above >= 10);
+            assert(above >= 10 && below >= 10);
         }
         for(unsigned row=0;row<controls.wifi.count;++row) {
             int top=40+72+30*row,bottom=top+24,first=bottom,last=top;
@@ -640,18 +692,22 @@ int main(int argc, char **argv)
     if (controls.view == FMO_VIEW_MONITOR) {
         verify_channel_center();
         verify_connection_gap();
+        const char *link = controls.stations.audio_paused ? "正在确认台站" : error[0] ? "网络连接异常" :
+            !state.wifi_connected ? "正在连接 Wi-Fi" : !state.events_connected ? "正在连接 FMO" :
+            !state.channel_valid ? "频道确认中" : "FMO 已连接";
+        verify_audio_row(link,controls.audio_enabled ? controls.volume : 0);
         verify_callsign_center(116);
     }
     if (controls.view == FMO_VIEW_MONITOR && !ssid[0]) {
-        char footer[80];
-        snprintf(footer,sizeof(footer),"音频: %u%%  长按上: 台站",
-                 controls.audio_enabled ? controls.volume : 0);
+        const char *footer = "长按上: 切换台站 长按确认: 网络";
         lv_obj_t *hint = find_text(lv_screen_active(), footer);
         assert(hint);
         lv_point_t size;
         lv_text_get_size(&size, footer, lv_obj_get_style_text_font(hint, 0),
                          0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         assert(size.x <= 216); /* Key actions must fit with no ellipsis. */
+        assert(lv_obj_get_style_text_font(hint,0)==fmo_wifi_font());
+        assert(lv_obj_get_height(hint)==fmo_wifi_font()->line_height);
     }
     if (argc > 1 && !strcmp(argv[1],"wifi_long")) {
         lv_obj_t *selected=find_text(lv_screen_active(),controls.wifi.names[controls.selection]);
@@ -664,13 +720,15 @@ int main(int argc, char **argv)
     }
     if (controls.view == FMO_VIEW_STATIONS) {
         verify("台站列表",0xFF8A00);
-        const char *footer=controls.stations.audio_paused ? "切换期间暂停音频" : "上下选择 OK切换 长按OK返回";
+        const char *footer=controls.stations.audio_paused || controls.stations.status==FMO_STATIONS_LOADING ?
+            "请稍候 长按确认返回" : controls.stations.status==FMO_STATIONS_LOAD_FAILED || controls.stations.status==FMO_STATIONS_EMPTY ?
+            "确认重试 长按返回" : "上/下: 选择 长按确认: 返回";
         verify(footer,0x929292);
         lv_obj_t *hint=find_text(lv_screen_active(),footer);
         lv_point_t size;
-        lv_text_get_size(&size,footer,&fmo_channel_font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        lv_text_get_size(&size,footer,fmo_wifi_font(),0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
         assert(size.x<=216);
-        assert(lv_obj_get_style_text_font(hint,0)==&fmo_channel_font);
+        assert(lv_obj_get_style_text_font(hint,0)==fmo_wifi_font());
         int first=320,last=0;
         for(int y=282;y<320;++y) for(int x=0;x<240;++x) if(pixels[y*240+x]) {
             if(y<first)first=y;
