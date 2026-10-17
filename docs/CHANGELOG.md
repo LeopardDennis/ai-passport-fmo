@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Show cached short place names beside callsigns using asynchronous, verified HTTPS Photon lookup, with grid fallback, optional WGS84 coordinates, bounded persistent cache/backoff and stale-result isolation. Keep long names on one line and retain places after PTT release. Add coordinate/cache/parser/state/layout tests and OpenStreetMap attribution. Center the setup QR title and browser address. Physical query latency and audio coexistence remain unverified.
+
 - Match the station-list current-item marker to the saved Wi-Fi list: use a fixed right-side check mark, black on the selected row and orange otherwise. Reserve space beside station names so scrolling text cannot overlap the marker.
 
 - Clarify the setup QR page address hint with an explicit browser-open instruction, keeping the address on the same line.

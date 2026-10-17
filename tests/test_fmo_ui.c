@@ -588,6 +588,12 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "long")) {
         fmo_monitor_apply_speaker(&state,"BG5ESN/12345678","PM01ABC1234",true,false, false,12000);
     }
+    if (argc > 1 && !strncmp(argv[1], "location", 8)) {
+        fmo_monitor_apply_speaker(&state, "BG5ESN", "PM01AA", true, false, false, 12000);
+        strcpy(state.location, !strcmp(argv[1], "location_long") ? "内蒙古自治区呼和浩特市" : "佛山市");
+        if (!strcmp(argv[1], "location_last"))
+            fmo_monitor_apply_speaker(&state, "BG5ESN", "", false, false, false, 12010);
+    }
     if (argc > 1 && !strcmp(argv[1], "muted")) controls.audio_enabled=false;
     if (argc > 1 && !strcmp(argv[1], "volume100")) controls.volume=100;
     if (argc > 1 && !strcmp(argv[1], "fmo_offline")) state.events_connected=false;
@@ -597,6 +603,24 @@ int main(int argc, char **argv)
     if (argc > 1 && (!strcmp(argv[1], "empty") || !strcmp(argv[1], "lan"))) memset(&state.history, 0, sizeof(state.history));
     if (argc > 1 && !strcmp(argv[1], "error")) error="NETWORK START FAILED";
     fmo_ui_render(&state, error, ssid, password, 82, 12000, false, &controls);
+    if (argc > 1 && !strncmp(argv[1], "location", 8)) {
+        lv_obj_update_layout(lv_screen_active());
+        lv_obj_t *call = find_text(lv_screen_active(), "BG5ESN");
+        lv_obj_t *parent = lv_obj_get_parent(call);
+        /* Locate by gray style: LVGL replaces overlong label text with dots. */
+        bool found = false;
+        for (unsigned i=0;i<lv_obj_get_child_count(parent);++i) {
+            lv_obj_t *obj=lv_obj_get_child(parent,i);
+            if (!lv_obj_check_type(obj,&lv_label_class) || lv_obj_has_flag(obj,LV_OBJ_FLAG_HIDDEN) ||
+                lv_obj_get_y(obj)<116 || lv_obj_get_y(obj)>148 || obj==call) continue;
+            lv_area_t a,b;lv_obj_get_coords(call,&a);lv_obj_get_coords(obj,&b);
+            assert(b.x1>=a.x2+8 && b.x2<=227 && lv_obj_get_width(obj)<=80);
+            assert(lv_obj_get_height(obj)==fmo_channel_font.line_height);
+            found=true;
+        }
+        assert(found);
+        assert(!find_text(lv_screen_active(), "PM01AA"));
+    }
     if (argc > 1 && !strcmp(argv[1], "brackets")) {
         lv_obj_t *channel = find_text(lv_screen_active(), "面包圈（洛）");
         assert(channel);

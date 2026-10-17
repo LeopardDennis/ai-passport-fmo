@@ -25,14 +25,59 @@ All enabled sockets reconnect automatically. No FMO device certificate or privat
 is copied to AI Passport because the firmware observes the local FMO interface;
 it does not act as a virtual FMO radio or connect directly to an FMO MQTT server.
 
+## Speaker location
+
+The gray slot beside the callsign displays only a place name, without a prefix,
+distance, bearing, or weather. It uses the existing Chinese font and a single
+line up to 80 px wide; long names end in dots. The callsign keeps its existing
+large/small font fitting behavior.
+
+A lifetime background worker converts 4/6/8-character Maidenhead grids to their
+cell centers and queries [Photon](https://github.com/komoot/photon). Optional
+numeric `latitude` / `longitude` fields in a `qso/callsign` start event take
+priority as WGS84 decimal degrees. Invalid/missing pairs fall back to the grid.
+The reference FMO client documents grids; coordinate fields from other firmware
+variants still need device verification. A grid represents an area, so its
+center-derived city can differ near boundaries. No inferred precision label is
+added on screen.
+
+The default HTTPS endpoint is `https://photon.komoot.io/reverse`. Only coordinates
+are sent, without callsigns, FMO credentials, or Wi-Fi secrets. TLS certificates
+and hostname are verified using the common CA bundle; uncached lookups wait for
+a valid system clock and sufficient heap. Internet/DNS/TLS failures leave the
+grid intact. Cached places work on a connected local FMO network without Internet.
+The public demo permits reasonable use but has no availability guarantee; a
+larger deployment should set `CONFIG_FMO_GEOCODER_URL` to its own Photon HTTPS
+endpoint. An empty value disables lookup. This endpoint is selected at build time.
+Location data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright);
+attribution is also shown on the setup web page.
+
+The worker polls the latest speaker every 200 ms and never blocks UI, event
+processing, or audio tasks. Requests are separated by at least 15 seconds;
+failures impose a 60-second global backoff and a five-minute negative cache.
+The HTTP body is capped at 4 KiB, each socket wait at three seconds, and the
+read loop has an eight-second deadline (a blocking socket operation may finish
+after the deadline). A short transmission can finish before lookup returns;
+the result still updates the last contact if its channel, callsign and position
+match. Stale results are cached without overwriting a newer speaker.
+
+Up to 32 successful places persist in ordinary application NVS, bounded to
+roughly 4 KiB of NVS entries plus namespace/page overhead; the RAM cache is about
+2.2 KiB. The worker has a 6 KiB stack, with additional transient HTTP/TLS heap.
+Entries are evicted in bounded rotation and have no time-based expiry. Reboot
+retains them; firmware installation cleanup removes them. Only successful new
+queries write flash. Storage errors retain the RAM result. Physical TLS/audio
+coexistence and lookup latency remain device checks.
+
 ## Configure
 
 The portrait UI uses black, orange and white based on the supplied FMO reference
 images (not an official color specification). The large callsign belongs to the
 active speaker: bold orange for ordinary speech, red when `crossServer` is true
 (or 1), and bold white for the last-heard callsign while
-idle. The grid follows the large callsign in smaller gray text and remains after
-release until the next speaker replaces it; missing grids are hidden. Elapsed-time counters and station/host prefixes are hidden.
+idle. A short place name follows the callsign in smaller gray text; before lookup
+succeeds, the original grid remains visible. The last contact retains its place
+after release. Missing location data is hidden. Elapsed-time counters and station/host prefixes are hidden.
 The thin yellow bar shows the RMS strength of conversation PCM sent to playback,
 with a quick rise and smooth fall. It uses the source audio level independently
 of speaker volume and clears when muted, disconnected, or viewing setup/menus.

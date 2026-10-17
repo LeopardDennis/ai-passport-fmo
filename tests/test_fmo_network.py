@@ -35,6 +35,7 @@ def run():
     functions = "\n".join(extract_function(source, name) for name in (
         "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_station_list", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
     functions += "\n" + source[source.index("void fmo_network_request_retry(void)"):source.index("bool fmo_network_get_saved_wifi(")]
+    functions += "\n" + source[source.index("bool fmo_network_location_snapshot("):]
     preamble = r'''
 #include "fmo_monitor_state.h"
 #include "fmo_wifi_profiles.h"
@@ -98,7 +99,7 @@ static int esp_websocket_client_send_text(int client, const char *data, size_t l
 }
 static int storage_attempts, wifi_attempts, cleanups, backoffs, setup_checks;
 static bool recovery_test, storage_good;
-static atomic_bool s_retry_requested, s_reconnect, s_setup_active;
+static atomic_bool s_retry_requested, s_reconnect, s_setup_active, s_setup_requested;
 static int station_handle, *s_station;
 static bool s_wifi_initialized;
 static void *s_wifi_handler, *s_ip_handler;
@@ -678,6 +679,25 @@ int main(void) {
     assert(!prepare_station_work() && !s_control_socket.client);
     parse_fmo_message(FMO_SOCKET_CONTROL,list);
     assert(s_snapshot.stations.status==FMO_STATIONS_LOAD_FAILED && !s_snapshot.stations.count);
+
+    memset(&s_snapshot,0,sizeof(s_snapshot));
+    atomic_store(&s_setup_active,false);
+    post_link(FMO_UPDATE_WIFI,true); post_link(FMO_UPDATE_EVENTS_LINK,true);
+    parse_fmo_message(FMO_SOCKET_EVENTS,"{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"TEST\",\"isSpeaking\":true,\"grid\":\"PM01AA\",\"latitude\":31.23,\"longitude\":121.47}}");
+    fmo_monitor_state_t place_request;
+    assert(fmo_network_location_snapshot(&place_request));
+    assert(place_request.position_valid && place_request.position.lat_e6==31230000);
+    parse_fmo_message(FMO_SOCKET_EVENTS,"{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"isSpeaking\":false}}");
+    fmo_network_location_result(&place_request,"上海市");
+    assert(!strcmp(published.state.location,"上海市") && !published.state.speaking);
+    assert(!fmo_network_location_snapshot(&place_request));
+    parse_fmo_message(FMO_SOCKET_EVENTS,"{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"NEXT\",\"isSpeaking\":true,\"grid\":\"PM01AA\",\"latitude\":999,\"longitude\":121.47}}");
+    assert(published.state.speaking && !published.state.position_valid && !published.state.location[0]);
+    fmo_network_location_result(&place_request,"上海市");
+    assert(!published.state.location[0]);
+    atomic_store(&s_setup_requested,true);
+    assert(!fmo_network_location_snapshot(&place_request));
+    atomic_store(&s_setup_requested,false);
     test_metadata_recovery();
     puts("FMO network parser: PASS (cross-server flags/color lifecycle, recent-three history/sorting/isolation, large history receive/fragmentation, local profile exclusion, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");
 }
@@ -689,7 +709,7 @@ int main(void) {
         subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                         "-I" + str(ROOT / "main"), "-I" + str(cjson), str(file),
                         str(cjson / "cJSON.c"), str(ROOT / "main/fmo_monitor_state.c"), str(ROOT / "main/fmo_stations.c"),
-                        str(ROOT / "main/fmo_text.c"), str(ROOT / "main/fmo_ws_rx.c"), "-lm", "-o", str(binary)], check=True)
+                        str(ROOT / "main/fmo_text.c"), str(ROOT / "main/fmo_location.c"), str(ROOT / "main/fmo_ws_rx.c"), "-lm", "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
 
 

@@ -168,6 +168,7 @@ static const char page[] =
 "<button id='fmosave'>保存 FMO 地址</button><button id='fmotest' type='button'>检查端口</button></form>"
 "<small>检查使用已保存 Wi-Fi；端口可达不代表 FMO 接口兼容。新 Wi-Fi 保存成功后，可再次进入配网检查。</small>"
 "<h2>已保存网络（最多 5 组）</h2><div id='saved'></div>"
+"<p><small>位置数据 © <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap contributors</a> · Photon</small></p>"
 "<button id='finish' type='button'>完成并连接已保存网络</button><script>const token='";
 static const char page_end[] =
 "';const form=document.getElementById('form'),ssid=document.getElementById('ssid'),pass=document.getElementById('pass'),net=document.getElementById('net'),save=document.getElementById('save'),result=document.getElementById('result');"

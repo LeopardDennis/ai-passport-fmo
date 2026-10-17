@@ -29,6 +29,8 @@ typedef struct {
     uint32_t uid;
     char callsign[16];
     char grid[12];
+    bool position_valid;
+    fmo_position_t position;
     char text[48];
     fmo_history_t history;
 } fmo_update_t;
@@ -59,3 +61,7 @@ void fmo_network_cancel_setup(void);
 /* Nonblocking; false means another request or state publication owns the lock. */
 bool fmo_network_request_stations(uint32_t start);
 bool fmo_network_switch_station(uint32_t uid);
+
+/* Background geocoder only. Copies/publishes under the network state lock. */
+bool fmo_network_location_snapshot(fmo_monitor_state_t *state);
+void fmo_network_location_result(const fmo_monitor_state_t *request, const char *name);

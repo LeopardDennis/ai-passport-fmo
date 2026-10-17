@@ -1,4 +1,5 @@
 #include "fmo_network.h"
+#include "fmo_geocoder.h"
 #include "fmo_audio.h"
 #include "fmo_provision.h"
 #include "esp_system.h"
@@ -141,6 +142,7 @@ static void post_update(const fmo_update_t *update)
             }
             fmo_monitor_apply_speaker(state, update->callsign, update->grid,
                                       update->speaking, update->is_host, update->cross_server, now_ms());
+            if (update->speaking) fmo_monitor_set_position(state, update->position_valid, update->position);
         }
         break;
     case FMO_UPDATE_HISTORY:
@@ -347,6 +349,12 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
                 if (is_host) valid = valid && (cJSON_IsBool(is_host) || (cJSON_IsNumber(is_host) &&
                     (is_host->valuedouble == 0 || is_host->valuedouble == 1)));
                 update.is_host = json_bool(is_host);
+                /* Optional WGS84 pair used by coordinate-capable variants.
+                 * Malformed optional coordinates fall back to grid, not PTT loss. */
+                const cJSON *lat = cJSON_GetObjectItemCaseSensitive(data, "latitude");
+                const cJSON *lon = cJSON_GetObjectItemCaseSensitive(data, "longitude");
+                update.position_valid = cJSON_IsNumber(lat) && cJSON_IsNumber(lon) &&
+                    fmo_location_coordinates(lat->valuedouble, lon->valuedouble, &update.position);
                 /* Decorative metadata must never blank a valid PTT/channel.
                  * Missing/unknown flag values use the ordinary speaker color. */
                 update.cross_server = cJSON_IsTrue(cross_server) ||
@@ -729,6 +737,8 @@ static bool prepare_station_work(void)
             fmo_monitor_set_events(&s_snapshot.state, false);
             s_snapshot.state.last_speaker[0] = '\0';
             s_snapshot.state.grid[0] = '\0';
+            s_snapshot.state.location[0] = '\0';
+            s_snapshot.state.position_valid = false;
             ++s_speaker_revision;
         }
         xQueueOverwrite(s_update_queue, &s_snapshot);
@@ -900,6 +910,7 @@ static void network_task(void *argument)
 {
     (void)argument;
     prepare_network();
+    fmo_geocoder_start();
     esp_err_t err;
 
     s_tried_profiles = fmo_provision_preferred_mask();
@@ -1067,4 +1078,24 @@ bool fmo_network_switch_station(uint32_t uid)
     xSemaphoreGive(s_state_lock);
     if (accepted) fmo_network_request_refresh();
     return accepted;
+}
+
+bool fmo_network_location_snapshot(fmo_monitor_state_t *state)
+{
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    *state = s_snapshot.state;
+    bool ready = state->wifi_connected && state->events_connected && state->last_speaker[0] &&
+                 !state->location[0] && !s_snapshot.stations.audio_paused &&
+                 !atomic_load(&s_setup_active) && !atomic_load(&s_setup_requested);
+    xSemaphoreGive(s_state_lock);
+    return ready;
+}
+
+void fmo_network_location_result(const fmo_monitor_state_t *request, const char *name)
+{
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if (!s_snapshot.stations.audio_paused && !atomic_load(&s_setup_active) &&
+        !atomic_load(&s_setup_requested) && fmo_monitor_apply_location(&s_snapshot.state, request, name))
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+    xSemaphoreGive(s_state_lock);
 }

@@ -71,6 +71,8 @@ run_static_checks() {
     python3 tests/test_fmo_provision_access.py
     python3 tests/test_fmo_provision_runtime.py
     python3 tests/test_fmo_network.py
+    python3 tests/test_fmo_location.py
+    python3 tests/test_fmo_geocoder.py
     python3 tests/test_fmo_endpoint_runtime.py
     python3 tests/test_build_config.py
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
@@ -125,6 +127,8 @@ PYCONFIG
         idf.py -B "${validation_build_dir}" \
         -D "SDKCONFIG=${validation_build_dir}/sdkconfig" build
     FMO_REQUIRE_NETWORK_TEST=1 python3 tests/test_fmo_network.py
+    FMO_REQUIRE_NETWORK_TEST=1 python3 tests/test_fmo_location.py
+    FMO_REQUIRE_NETWORK_TEST=1 python3 tests/test_fmo_geocoder.py
     FMO_REQUIRE_NETWORK_TEST=1 python3 tests/test_fmo_endpoint_runtime.py
     idf.py -B "${validation_build_dir}" merge-bin \
         -o "${validation_build_dir}/FoloToy-AI-Passport-full.bin"

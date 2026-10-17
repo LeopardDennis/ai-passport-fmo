@@ -35,6 +35,8 @@ void fmo_monitor_set_wifi(fmo_monitor_state_t *state, bool connected)
         state->speaker[0] = '\0';
         state->last_speaker[0] = '\0';
         state->grid[0] = '\0';
+        state->location[0] = '\0';
+        state->position_valid = false;
         state->last_speaker_ms = 0;
         state->channel_uid = 0;
         state->channel_name[0] = '\0';
@@ -78,6 +80,8 @@ void fmo_monitor_set_channel(fmo_monitor_state_t *state, uint32_t uid,
         state->speaker[0] = '\0';
         state->last_speaker[0] = '\0';
         state->grid[0] = '\0';
+        state->location[0] = '\0';
+        state->position_valid = false;
         state->last_speaker_ms = 0;
     }
     state->channel_uid = uid;
@@ -94,6 +98,10 @@ void fmo_monitor_apply_speaker(fmo_monitor_state_t *state,
 
     if (speaking) {
         if (!callsign[0]) return;
+        if (strcmp(state->last_speaker, callsign) || strcmp(state->grid, grid ? grid : "")) {
+            state->location[0] = 0;
+            state->position_valid = false;
+        }
         copy_text(state->speaker, sizeof(state->speaker), callsign);
         copy_text(state->last_speaker, sizeof(state->last_speaker), callsign);
         copy_text(state->grid, sizeof(state->grid), grid);
@@ -110,4 +118,26 @@ void fmo_monitor_apply_speaker(fmo_monitor_state_t *state,
         state->speaker[0] = '\0';
         state->last_speaker_ms = now_ms;
     }
+}
+
+void fmo_monitor_set_position(fmo_monitor_state_t *state, bool valid, fmo_position_t position)
+{
+    if (state->position_valid != valid || (valid &&
+        (state->position.lat_e6 != position.lat_e6 || state->position.lon_e6 != position.lon_e6)))
+        state->location[0] = 0;
+    state->position_valid = valid;
+    state->position = position;
+}
+
+bool fmo_monitor_apply_location(fmo_monitor_state_t *state,
+                                const fmo_monitor_state_t *request, const char *name)
+{
+    if (!name || !name[0] || !state->wifi_connected || !state->events_connected ||
+        !state->last_speaker[0] || state->channel_uid != request->channel_uid ||
+        strcmp(state->last_speaker, request->last_speaker) || strcmp(state->grid, request->grid) ||
+        state->position_valid != request->position_valid ||
+        (state->position_valid && (state->position.lat_e6 != request->position.lat_e6 ||
+                                  state->position.lon_e6 != request->position.lon_e6)) ||
+        !strcmp(state->location, name)) return false;
+    return fmo_text_copy_utf8(state->location, sizeof(state->location), name);
 }

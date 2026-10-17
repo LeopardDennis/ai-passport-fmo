@@ -29,6 +29,9 @@ idf_component_register(
          "fmo_storage.c"
          "fmo_storage_policy.c"
          "fmo_network.c"
+         "fmo_location.c"
+         "fmo_location_json.c"
+         "fmo_geocoder.c"
          "fmo_ws_rx.c"
          "fmo_provision.c"
          "fmo_credentials.c"
@@ -39,5 +42,5 @@ idf_component_register(
          "demo_radio.c"
     INCLUDE_DIRS "."
     REQUIRES bsp esp_event esp_hw_support esp_netif esp_timer esp_wifi
-             esp_websocket_client esp_http_server esp_app_format esp_partition json nvs_flash
+             esp_websocket_client esp_http_client mbedtls esp_http_server esp_app_format esp_partition json nvs_flash
 )

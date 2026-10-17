@@ -1,5 +1,6 @@
 #pragma once
 
+#include "fmo_location.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -34,6 +35,9 @@ typedef struct {
     char speaker[FMO_CALLSIGN_MAX + 1];
     char last_speaker[FMO_CALLSIGN_MAX + 1];
     char grid[FMO_GRID_MAX + 1];
+    bool position_valid;
+    fmo_position_t position;
+    char location[FMO_LOCATION_MAX + 1];
 } fmo_monitor_state_t;
 
 void fmo_monitor_state_init(fmo_monitor_state_t *state);
@@ -47,3 +51,8 @@ void fmo_monitor_invalidate_channel(fmo_monitor_state_t *state);
 void fmo_monitor_apply_speaker(fmo_monitor_state_t *state,
                                const char *callsign, const char *grid,
                                bool speaking, bool is_host, bool cross_server, uint64_t now_ms);
+
+void fmo_monitor_set_position(fmo_monitor_state_t *state, bool valid, fmo_position_t position);
+/* Accept late lookup after PTT release, but never for another speaker/source. */
+bool fmo_monitor_apply_location(fmo_monitor_state_t *state,
+                                const fmo_monitor_state_t *request, const char *name);

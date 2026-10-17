@@ -308,8 +308,10 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
                 label(overlay, 12, 152, 216, &fmo_channel_font, MUTED, "浏览器打开");
                 label(overlay, 12, 181, 216, &lv_font_montserrat_20, ORANGE, "192.168.9.1");
             } else {
-                label(overlay, 12, 2, 216, &fmo_channel_font, ORANGE, "扫码连接配网热点");
-                label(overlay, 12, 184, 216, &fmo_channel_font, WHITE, "浏览器打开: 192.168.9.1");
+                lv_obj_t *setup_title = label(overlay, 12, 2, 216, &fmo_channel_font, ORANGE, "扫码连接配网热点");
+                lv_obj_set_style_text_align(setup_title, LV_TEXT_ALIGN_CENTER, 0);
+                lv_obj_t *setup_address = label(overlay, 12, 184, 216, &fmo_channel_font, WHITE, "浏览器打开: 192.168.9.1");
+                lv_obj_set_style_text_align(setup_address, LV_TEXT_ALIGN_CENTER, 0);
             }
             overlay_footer = label(overlay, 12, FOOTER_TOP - 40, 216, fmo_wifi_font(), MUTED,
                   info ? "确认: 查看二维码 长按确认: 返回" : "确认: 查看详情 长按确认: 返回");
@@ -606,6 +608,7 @@ static void create_monitor(void)
     lv_label_set_long_mode(callsign_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     center_ink(callsign_label, CALLSIGN_TOP, 32, 'H');
     grid_label = label(screen, 12, CALLSIGN_TOP, 80, &fmo_channel_font, GRID_COLOR, "");
+    lv_obj_set_height(grid_label, fmo_channel_font.line_height);
     lv_obj_add_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
     audio_bar_width = 0;
     lv_obj_add_event_cb(screen, draw_audio_bar, LV_EVENT_DRAW_MAIN_END, NULL);
@@ -692,11 +695,13 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     const lv_font_t *small = setup ? &lv_font_montserrat_20 : &fmo_callsign_bold_20;
     /* A release retains the last speaker's grid; the next start replaces it,
      * including clearing it when that talker supplies no grid. */
-    const char *grid = !setup && live && s->last_speaker[0] ? s->grid : "";
+    const char *grid = !setup && live && s->last_speaker[0] ?
+        (s->location[0] ? s->location : s->grid) : "";
     bool grid_changed = text(grid_label, grid);
     if (!callsign_layout_valid || call_changed || grid_changed || setup != callsign_setup) {
         lv_point_t grid_size = {0}, size;
         if (grid[0]) lv_text_get_size(&grid_size, grid, &fmo_channel_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        if (grid_size.x > 80) grid_size.x = 80;
         int call_space = 216 - (grid[0] ? grid_size.x + 8 : 0);
         lv_text_get_size(&size, call, large, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         const lv_font_t *font = size.x > call_space ? small : large;
