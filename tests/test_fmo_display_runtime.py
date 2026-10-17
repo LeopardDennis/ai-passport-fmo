@@ -106,11 +106,11 @@ int main(void) {
     assert(panel_dark && paused && atomic_load(&s_display_dark) && brightness==0);
     assert(!strcmp(trace,"ps") && renders==0);
     // Press and long press belong to one wake gesture; neither reconfigures Wi-Fi.
-    clock_ms=90001; key(BSP_BTN_OK, BSP_BTN_PRESS); trace[0]=0;
+    clock_ms=90001; key(BSP_BTN_UP, BSP_BTN_PRESS); trace[0]=0;
     assert(update_display(clock_ms));
     assert(!strcmp(trace,"wridfb") && brightness==80 && notices==1);
-    key(BSP_BTN_OK, BSP_BTN_LONG); assert(!setups && !requests);
-    key(BSP_BTN_OK, BSP_BTN_PRESS); key(BSP_BTN_OK, BSP_BTN_LONG);
+    key(BSP_BTN_UP, BSP_BTN_LONG); assert(!setups && !requests);
+    key(BSP_BTN_UP, BSP_BTN_PRESS); key(BSP_BTN_UP, BSP_BTN_LONG);
     assert(!setups && s_controls.view==FMO_VIEW_NETWORK);
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(setups==1);
     fmo_controls_observe_setup(&s_controls, true);
@@ -162,8 +162,11 @@ int main(void) {
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(!s_controls.audio_enabled && audio_volume==0);
     key(BSP_BTN_UP, BSP_BTN_CLICK); assert(s_controls.volume==70 && audio_volume==0);
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.audio_enabled && audio_volume==70);
-    key(BSP_BTN_UP, BSP_BTN_LONG); assert(requests==1);
+    key(BSP_BTN_OK, BSP_BTN_LONG); assert(requests==1);
     assert(s_controls.view==FMO_VIEW_STATIONS && s_controls.stations.status==FMO_STATIONS_LOADING);
+    key(BSP_BTN_UP, BSP_BTN_LONG); assert(s_controls.view==FMO_VIEW_STATIONS && requests==1);
+    key(BSP_BTN_OK, BSP_BTN_LONG); assert(s_controls.view==FMO_VIEW_MONITOR);
+    key(BSP_BTN_OK, BSP_BTN_LONG); assert(s_controls.view==FMO_VIEW_STATIONS && requests==1);
     assert(update_display(clock_ms+600000)); // Browsing keeps the display awake.
     next_snapshot.state=s_state; next_snapshot.stations.status=FMO_STATIONS_READY;
     next_snapshot.stations.count=1; next_snapshot.stations.rows[0].uid=43;

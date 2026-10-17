@@ -173,7 +173,7 @@ static void draw_wifi_rows(lv_event_t *event)
     }
 }
 static lv_obj_t *station_status, *station_page, *station_footer, *overlay_footer;
-static lv_obj_t *station_names[FMO_STATION_PAGE_SIZE];
+static lv_obj_t *station_names[FMO_STATION_PAGE_SIZE], *station_badge;
 static unsigned station_draw_count, station_draw_selection;
 
 /* Six fixed row backgrounds share the overlay draw pass. Avoid six container
@@ -238,9 +238,10 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
             station_draw_selection = UINT32_MAX;
             lv_obj_add_event_cb(overlay, draw_station_rows, LV_EVENT_DRAW_MAIN, NULL);
             for (unsigned i = 0; i < FMO_STATION_PAGE_SIZE; ++i) {
-                station_names[i] = label(overlay, 20, 64 + 28 * i, 200, &fmo_channel_font, WHITE, "");
+                station_names[i] = label(overlay, 20, 64 + 28 * i, 176, &fmo_channel_font, WHITE, "");
                 lv_obj_set_height(station_names[i], fmo_channel_font.line_height);
             }
+            station_badge = label(overlay, 204, 64, 16, &lv_font_montserrat_14, ORANGE, LV_SYMBOL_OK);
             station_footer = label(overlay, 12, FOOTER_TOP - 40, 216, fmo_wifi_font(), MUTED, "");
             lv_obj_set_style_text_align(station_footer, LV_TEXT_ALIGN_CENTER, 0);
         } else if (view == FMO_VIEW_NETWORK) {
@@ -308,16 +309,16 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
                 label(overlay, 12, 181, 216, &lv_font_montserrat_20, ORANGE, "192.168.9.1");
             } else {
                 label(overlay, 12, 2, 216, &fmo_channel_font, ORANGE, "扫码连接配网热点");
-                label(overlay, 12, 184, 216, &fmo_channel_font, WHITE, "浏览器: 192.168.9.1");
+                label(overlay, 12, 184, 216, &fmo_channel_font, WHITE, "浏览器打开: 192.168.9.1");
             }
             overlay_footer = label(overlay, 12, FOOTER_TOP - 40, 216, fmo_wifi_font(), MUTED,
-                  info ? "确认查看二维码 长按返回" : "确认查看密码 长按返回");
+                  info ? "确认: 查看二维码 长按确认: 返回" : "确认: 查看详情 长按确认: 返回");
 
         }
     }
     if (overlay_footer) {
         if (view == FMO_VIEW_WIFI)
-            text(overlay_footer, controls->wifi.count ? "上/下: 选择 长按确认: 返回" : "请先配网 长按确认返回");
+            text(overlay_footer, controls->wifi.count ? "上/下: 选择 长按确认: 返回" : "长按确认: 返回");
         if (lv_obj_get_style_text_align(overlay_footer, 0) != LV_TEXT_ALIGN_CENTER)
             lv_obj_set_style_text_align(overlay_footer, LV_TEXT_ALIGN_CENTER, 0);
         center_ink(overlay_footer, FOOTER_TOP - 40, 18, 'H');
@@ -400,6 +401,7 @@ static void render_stations(const fmo_controls_t *controls, const fmo_monitor_st
         station_draw_selection = controls->selection;
         lv_obj_invalidate(overlay);
     }
+    lv_obj_add_flag(station_badge, LV_OBJ_FLAG_HIDDEN);
     for (unsigned i = 0; i < FMO_STATION_PAGE_SIZE; ++i) {
         bool present = i < s->count && s->status != FMO_STATIONS_LOADING;
         if (!present) { lv_obj_add_flag(station_names[i], LV_OBJ_FLAG_HIDDEN); continue; }
@@ -407,27 +409,32 @@ static void render_stations(const fmo_controls_t *controls, const fmo_monitor_st
         bool selected = i == controls->selection;
         color(station_names[i], selected ? BLACK : WHITE);
         const fmo_station_t *row = &s->rows[i];
-        const char *mark = state->channel_valid && row->uid == state->channel_uid ? "* " : "";
+        bool current = state->channel_valid && row->uid == state->channel_uid;
         bool duplicate = false;
         for (unsigned j = 0; j < s->count; ++j)
             if (i != j && !strcmp(row->name, s->rows[j].name)) duplicate = true;
-        if (duplicate) snprintf(buffer, sizeof(buffer), "%s#%lu %s", mark, (unsigned long)row->uid, row->name);
-        else if (row->name[0]) snprintf(buffer, sizeof(buffer), "%s%s", mark, row->name);
-        else snprintf(buffer, sizeof(buffer), "%s台站 #%lu", mark, (unsigned long)row->uid);
+        if (duplicate) snprintf(buffer, sizeof(buffer), "#%lu %s", (unsigned long)row->uid, row->name);
+        else if (row->name[0]) snprintf(buffer, sizeof(buffer), "%s", row->name);
+        else snprintf(buffer, sizeof(buffer), "台站 #%lu", (unsigned long)row->uid);
         lv_label_long_mode_t mode = selected ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT;
         if (lv_label_get_long_mode(station_names[i]) != mode) lv_label_set_long_mode(station_names[i], mode);
         if (text(station_names[i], buffer)) center_ink(station_names[i], 64 + 28 * i, 26, 'H');
+        if (current) {
+            color(station_badge, selected ? BLACK : ORANGE);
+            center_ink(station_badge, 64 + 28 * i, 26, 'H');
+            lv_obj_remove_flag(station_badge, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     const char *footer;
     if (s->audio_paused || s->request != FMO_STATION_NONE ||
         s->status == FMO_STATIONS_IDLE || s->status == FMO_STATIONS_LOADING ||
         s->status == FMO_STATIONS_SWITCHING)
-        footer = "请稍候 长按确认返回";
+        footer = "长按确认: 返回";
     else if (s->status == FMO_STATIONS_LOAD_FAILED || s->status == FMO_STATIONS_EMPTY)
-        footer = "确认重试 长按返回";
+        footer = "确认: 重试 长按确认: 返回";
     else if (s->count)
         footer = "上/下: 选择 长按确认: 返回";
-    else footer = "长按确认返回";
+    else footer = "长按确认: 返回";
     if (text(station_footer, footer)) center_ink(station_footer, FOOTER_TOP - 40, 18, 'H');
 }
 
@@ -605,7 +612,7 @@ static void create_monitor(void)
     fmo_audio_meter_reset(&audio_meter);
     audio_meter_enabled = false;
     hint_label = label(screen, 12, FOOTER_TOP, 216, fmo_wifi_font(), MUTED,
-                       "长按上: 切换台站 长按确认: 网络");
+                       "长按确认: 切换台站 长按上: 网络");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, 0);
     center_ink(hint_label, FOOTER_TOP, 18, 'H');
 }
@@ -732,6 +739,6 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         }
         color(qso_labels[i], present ? WHITE : MUTED);
     }
-    if (text(hint_label, "长按上: 切换台站 长按确认: 网络"))
+    if (text(hint_label, "长按确认: 切换台站 长按上: 网络"))
         center_ink(hint_label, FOOTER_TOP, 18, 'H');
 }

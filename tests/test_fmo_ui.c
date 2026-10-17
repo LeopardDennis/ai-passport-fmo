@@ -634,8 +634,8 @@ int main(int argc, char **argv)
         }
     }
     const char *overlay_hint = controls.view==FMO_VIEW_NETWORK ? "上/下: 选择 长按确认: 返回" :
-        controls.view==FMO_VIEW_WIFI ? (controls.wifi.count ? "上/下: 选择 长按确认: 返回" : "请先配网 长按确认返回") :
-        controls.view==FMO_VIEW_SETUP ? (controls.setup_info ? "确认查看二维码 长按返回" : "确认查看密码 长按返回") : NULL;
+        controls.view==FMO_VIEW_WIFI ? (controls.wifi.count ? "上/下: 选择 长按确认: 返回" : "长按确认: 返回") :
+        controls.view==FMO_VIEW_SETUP ? (controls.setup_info ? "确认: 查看二维码 长按确认: 返回" : "确认: 查看详情 长按确认: 返回") : NULL;
     if(overlay_hint) {
         lv_obj_t *hint=find_text(lv_screen_active(),overlay_hint);assert(hint);
         lv_point_t size;
@@ -699,7 +699,7 @@ int main(int argc, char **argv)
         verify_callsign_center(116);
     }
     if (controls.view == FMO_VIEW_MONITOR && !ssid[0]) {
-        const char *footer = "长按上: 切换台站 长按确认: 网络";
+        const char *footer = "长按确认: 切换台站 长按上: 网络";
         lv_obj_t *hint = find_text(lv_screen_active(), footer);
         assert(hint);
         lv_point_t size;
@@ -721,8 +721,8 @@ int main(int argc, char **argv)
     if (controls.view == FMO_VIEW_STATIONS) {
         verify("台站列表",0xFF8A00);
         const char *footer=controls.stations.audio_paused || controls.stations.status==FMO_STATIONS_LOADING ?
-            "请稍候 长按确认返回" : controls.stations.status==FMO_STATIONS_LOAD_FAILED || controls.stations.status==FMO_STATIONS_EMPTY ?
-            "确认重试 长按返回" : "上/下: 选择 长按确认: 返回";
+            "长按确认: 返回" : controls.stations.status==FMO_STATIONS_LOAD_FAILED || controls.stations.status==FMO_STATIONS_EMPTY ?
+            "确认: 重试 长按确认: 返回" : "上/下: 选择 长按确认: 返回";
         verify(footer,0x929292);
         lv_obj_t *hint=find_text(lv_screen_active(),footer);
         lv_point_t size;

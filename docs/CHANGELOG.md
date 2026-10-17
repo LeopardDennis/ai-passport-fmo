@@ -6,6 +6,20 @@
 
 ## Unreleased
 
+- Match the station-list current-item marker to the saved Wi-Fi list: use a fixed right-side check mark, black on the selected row and orange otherwise. Reserve space beside station names so scrolling text cannot overlap the marker.
+
+- Clarify the setup QR page address hint with an explicit browser-open instruction, keeping the address on the same line.
+
+- Swap the main-screen long-press shortcuts: long confirm opens the station list and long UP opens network settings. Update the footer and button guide; retain long-confirm return in subpages and the boot-time UP Recovery gesture.
+
+- Use only the long-confirm return instruction in station-list waiting and fallback footers; the retry footer also includes the confirm-to-retry action. Use colon separators for each key action.
+
+- Clarify the setup details footer: press confirm to view the QR code, or hold confirm to return.
+
+- Clarify the setup QR footer: press confirm to view details, or hold confirm to return.
+
+- Simplify the empty saved-Wi-Fi list footer to the long-confirm return instruction.
+
 - Move the audio percentage to the right of connection status with a fixed right edge. Keep all page footers on one line in the same 14 px font, spell out both main-screen long-press shortcuts in a 14 px footer, use a shared UP/DOWN-selection and long-confirm-return hint for regular lists, and show applicable Wi-Fi and station actions. Verify volume extremes, status widths, page transitions and native rendering within the existing LVGL budget.
 
 - Rename the network menu entry from Retry Wi-Fi to Select Wi-Fi to describe the saved-network selection screen.
