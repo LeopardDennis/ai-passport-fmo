@@ -6,7 +6,7 @@
 
 This firmware turns a FoloToy AI Passport into a small connected status display
 for a local FMO (NFM Over Internet) device. It shows the selected FMO channel,
-the callsign currently speaking, the last-heard callsign while idle, the three most recent
+the callsign currently speaking, the last-heard callsign while idle, the two most recent
 contact records, connection state, and battery level.
 
 ## How it works
@@ -18,7 +18,7 @@ The monitor uses the local web interface exposed by an FMO device:
 - `ws://<host>:<port>/ws` receives a periodic
   `station/getCurrent` request so the display can show the selected channel.
 - `qso/history` on `/events` supplies recent callsigns and UTC timestamps;
-  the monitor displays the newest three records without querying saved-log details.
+  the monitor displays the newest two records without querying saved-log details.
 
 The optional `ws://<host>:<port>/audio` connection receives conversation audio.
 All enabled sockets reconnect automatically. No FMO device certificate or private key
@@ -27,10 +27,38 @@ it does not act as a virtual FMO radio or connect directly to an FMO MQTT server
 
 ## Speaker location
 
-The gray slot beside the callsign displays only a place name, without a prefix,
-distance, bearing, or weather. It uses the existing Chinese font and a single
-line up to 80 px wide; long names end in dots. The callsign keeps its existing
-large/small font fitting behavior.
+The gray slot beside the callsign always displays the Maidenhead grid code.
+A gray line above the yellow audio bar and outside the QSO panel shows the
+current or last-heard speaker's short place name, bearing, and distance, in
+that order. Common Chinese administrative names are shortened for display,
+for example Inner Mongolia without its autonomous-region suffix, or Foshan
+without its city suffix.
+The original geocoder/cache value is retained. The 216 px row reserves room for
+the complete bearing and distance; only the place name ends in dots if needed.
+Missing or pending place names show `--`. The place belongs to the live/last
+speaker, independently of the two history records. The callsign keeps its
+existing large/small font fitting behavior.
+
+The origin is the coordinate configured on the connected FMO, read through
+`config/getCordinate` on `/ws` after the channel is confirmed, then at most once
+per minute. It is not the Passport's measured position. Numeric latitude and
+longitude are required; missing, out-of-range or `(0,0)` default coordinates
+leave distance/bearing as `--`. Control or Wi-Fi disconnection invalidates the
+origin. Coordinate replies have separate ownership from channel and station
+requests; an unanswered read expires after ten seconds and is not retried on
+that connection, so unsupported firmware does not force a reconnect.
+
+Distance is a great-circle estimate, and bearing is the initial direction from
+the FMO coordinate toward the speaker, clockwise from true north (not magnetic
+north or the device's orientation), with an eight-point compass abbreviation.
+Speaker WGS84 coordinates take priority; otherwise the grid center is used and
+both sources use the same display format. Coarse grids can introduce
+large distance/direction errors. Missing speaker positions show placeholders;
+coincident points and ambiguous polar/antipodal bearings show `--` for direction.
+These calculations need no Internet and retain the last contact after release.
+The actual FMO coordinate response and device layout still require hardware
+validation. Fixed distance/bearing text is drawn directly to preserve the
+24 KiB LVGL budget.
 
 A lifetime background worker converts 4/6/8-character Maidenhead grids to their
 cell centers and queries [Photon](https://github.com/komoot/photon). Optional
@@ -38,8 +66,8 @@ numeric `latitude` / `longitude` fields in a `qso/callsign` start event take
 priority as WGS84 decimal degrees. Invalid/missing pairs fall back to the grid.
 The reference FMO client documents grids; coordinate fields from other firmware
 variants still need device verification. A grid represents an area, so its
-center-derived city can differ near boundaries. No inferred precision label is
-added on screen.
+center-derived city can differ near boundaries. The place name itself does not
+claim more precision than the source coordinate.
 
 The default HTTPS endpoint is `https://photon.komoot.io/reverse`. Only coordinates
 are sent, without callsigns, FMO credentials, or Wi-Fi secrets. TLS certificates
@@ -75,9 +103,10 @@ The portrait UI uses black, orange and white based on the supplied FMO reference
 images (not an official color specification). The large callsign belongs to the
 active speaker: bold orange for ordinary speech, red when `crossServer` is true
 (or 1), and bold white for the last-heard callsign while
-idle. A short place name follows the callsign in smaller gray text; before lookup
-succeeds, the original grid remains visible. The last contact retains its place
-after release. Missing location data is hidden. Elapsed-time counters and station/host prefixes are hidden.
+idle. The original grid follows the callsign in smaller gray text, while the
+short place name shares a line with bearing and distance above the yellow audio bar and outside the QSO panel. Both remain
+after release. Missing grids are hidden; missing place names show `--`.
+Elapsed-time counters and station/host prefixes are hidden.
 The thin yellow bar shows the RMS strength of conversation PCM sent to playback,
 with a quick rise and smooth fall. It uses the source audio level independently
 of speaker volume and clears when muted, disconnected, or viewing setup/menus.
@@ -90,7 +119,7 @@ red at 20% or below, and shows an outlined unknown state when SOC is unavailable
 It does not infer charging. Channel and callsign text is centered using visible
 glyph bounds, including smaller fonts for long callsigns and setup passwords.
 
-The yellow panel is titled `QSO` and shows the three most recent contacts reported
+The yellow panel is titled `QSO` and shows the two most recent contacts reported
 by FMO, newest first. Each record uses two lines: a white bold callsign followed
 by its Beijing date/time (`YYYY-MM-DD HH:MM:SS`) in regular gray text.
 Repeated callsigns at different times

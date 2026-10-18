@@ -24,6 +24,43 @@ int main(void)
     assert(fmo_location_coordinates(31.23,121.47,&p));
     assert(p.lat_e6==31230000 && p.lon_e6==121470000);
 
+    double km, bearing;
+    assert(fmo_location_path((fmo_position_t){0,0}, (fmo_position_t){0,1000000}, &km, &bearing));
+    assert(fabs(km - 111.19508) < 0.001 && fabs(bearing - 90) < 0.000001);
+    assert(fmo_location_path((fmo_position_t){0,0}, (fmo_position_t){1000000,0}, &km, &bearing));
+    assert(fabs(bearing) < 0.000001);
+    assert(fmo_location_path((fmo_position_t){0,0}, (fmo_position_t){-1000000,0}, &km, &bearing));
+    assert(fabs(bearing - 180) < 0.000001);
+    assert(fmo_location_path((fmo_position_t){0,0}, (fmo_position_t){0,-1000000}, &km, &bearing));
+    assert(fabs(bearing - 270) < 0.000001);
+    /* Cross the antimeridian on the short eastward path. */
+    assert(fmo_location_path((fmo_position_t){0,179000000}, (fmo_position_t){0,-179000000}, &km, &bearing));
+    assert(fabs(km - 222.39016) < 0.001 && fabs(bearing - 90) < 0.000001);
+    assert(fmo_location_path(p, p, &km, &bearing));
+    assert(km == 0 && isnan(bearing));
+    assert(fmo_location_path((fmo_position_t){0,0}, (fmo_position_t){0,180000000}, &km, &bearing));
+    assert(fabs(km - 20015.11444) < 0.001 && isnan(bearing));
+    assert(fmo_location_path((fmo_position_t){90000000,0}, (fmo_position_t){80000000,0}, &km, &bearing));
+    assert(isfinite(km) && isnan(bearing));
+    assert(!fmo_location_path((fmo_position_t){91000000,0}, p, &km, &bearing));
+    assert(!fmo_location_path(p, (fmo_position_t){0,181000000}, &km, &bearing));
+    assert(!fmo_location_path(p, p, NULL, &bearing));
+
+    const char *full[] = {"内蒙古自治区", "广西壮族自治区", "宁夏回族自治区",
+        "新疆维吾尔自治区", "西藏自治区", "香港特别行政区", "澳门特别行政区",
+        "佛山市", "广东省", "呼和浩特市", "内蒙古自治区呼和浩特市", "New York", "--", ""};
+    const char *short_names[] = {"内蒙古", "广西", "宁夏", "新疆", "西藏", "香港", "澳门",
+        "佛山", "广东", "呼和浩特", "内蒙古呼和浩特", "New York", "--", ""};
+    for (unsigned i=0;i<sizeof(full)/sizeof(full[0]);++i) {
+        char short_name[FMO_LOCATION_MAX+1];
+        fmo_location_short_name(full[i],short_name,sizeof(short_name));
+        assert(!strcmp(short_name,short_names[i]));
+    }
+    char tiny[5];
+    fmo_location_short_name("内蒙古自治区",tiny,sizeof(tiny));
+    assert(!strcmp(tiny,"内"));
+    fmo_location_short_name(NULL,tiny,sizeof(tiny));
+    assert(!tiny[0]);
     fmo_location_cache_t cache={0};
     assert(!fmo_location_find(&cache,p,0));
     fmo_location_store(&cache,p,"上海市",0);

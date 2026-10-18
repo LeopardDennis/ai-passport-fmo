@@ -5,6 +5,7 @@
 #include "fmo_wifi_font.h"
 #include "src/misc/lv_text_private.h"
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -24,15 +25,17 @@
 #define LINK_HEIGHT 24
 #define CHANNEL_TOP 62
 #define CHANNEL_HEIGHT 32
-#define QSO_TOP 161
-#define QSO_ROW_HEIGHT 32
-#define QSO_ROWS_TOP 28
+#define QSO_TOP 183
+#define QSO_ROW_HEIGHT 36
+#define QSO_ROWS_TOP 29
 #define QSO_TEXT_HEIGHT 14
-#define QSO_TIME_OFFSET 16
+#define QSO_TIME_OFFSET 19
+#define LOCATION_TOP 150
+#define LOCATION_HEIGHT 16
 #define AIR_TOP 98
 #define AIR_HEIGHT 16
 #define CALLSIGN_TOP 116
-#define ACTIVITY_TOP 151
+#define ACTIVITY_TOP 173
 #define FOOTER_TOP 294
 LV_FONT_DECLARE(fmo_channel_font);
 LV_FONT_DECLARE(fmo_callsign_bold_14);
@@ -44,6 +47,10 @@ static lv_obj_t *battery_body;
 static int last_battery = -2;
 static lv_obj_t *air_label, *callsign_label, *grid_label, *hint_label;
 static lv_obj_t *qso_panel, *qso_labels[FMO_HISTORY_COUNT];
+static char path_text[64], location_text[FMO_LOCATION_MAX + 4];
+static bool path_cache_valid, path_ready;
+static fmo_position_t path_origin, path_target;
+static int path_left;
 static char qso_times[FMO_HISTORY_COUNT][20];
 static int64_t qso_stamps[FMO_HISTORY_COUNT];
 static bool qso_present[FMO_HISTORY_COUNT];
@@ -52,7 +59,6 @@ static int64_t clock_minute = INT64_MIN;
 static fmo_audio_meter_t audio_meter;
 static bool audio_meter_enabled;
 static int audio_bar_width;
-static int audio_bar_top = ACTIVITY_TOP;
 
 static bool text(lv_obj_t *label, const char *value)
 {
@@ -486,28 +492,11 @@ static void audio_bar_area(lv_obj_t *obj, lv_area_t *area, int width)
     lv_obj_get_coords(obj, area);
     area->x1 += 12;
     area->x2 = area->x1 + width - 1;
-    area->y1 += audio_bar_top;
+    area->y1 += ACTIVITY_TOP;
     area->y2 = area->y1 + 1;
 }
 
-/* Center the 2 px bar between visible callsign/grid ink and the panel.
- * Clear both old and new areas even when PCM width has not changed. */
-static void position_audio_bar(int ink_bottom)
-{
-    int top = (ink_bottom + QSO_TOP - 1) / 2;
-    if (top == audio_bar_top) return;
-    lv_area_t area;
-    if (audio_bar_width) {
-        audio_bar_area(monitor_content, &area, audio_bar_width);
-        lv_obj_invalidate_area(monitor_content, &area);
-    }
-    audio_bar_top = top;
-    if (audio_bar_width) {
-        audio_bar_area(monitor_content, &area, audio_bar_width);
-        lv_obj_invalidate_area(monitor_content, &area);
-    }
-}
-
+/* Fixed position leaves eight clear pixels above and below the PCM bar. */
 static void draw_audio_bar(lv_event_t *event)
 {
     if (!audio_bar_width) return;
@@ -566,11 +555,83 @@ static void draw_qso_times(lv_event_t *event)
     }
 }
 
+/* Geometry is recomputed only when the source coordinates or validity change. */
+static void render_path(const fmo_monitor_state_t *s, bool live)
+{
+    fmo_position_t target = s->position;
+    bool ready = live && s->last_speaker[0] && s->local_position_valid &&
+        (s->position_valid || fmo_location_grid(s->grid, &target));
+    if (path_cache_valid && ready == path_ready && (!ready ||
+        (s->local_position.lat_e6 == path_origin.lat_e6 && s->local_position.lon_e6 == path_origin.lon_e6 &&
+         target.lat_e6 == path_target.lat_e6 && target.lon_e6 == path_target.lon_e6))) return;
+    path_cache_valid = true;
+    path_ready = ready;
+    path_origin = s->local_position;
+    path_target = target;
+    char value[64] = "--° --  -- km";
+    double km, bearing;
+    if (ready && fmo_location_path(path_origin, target, &km, &bearing)) {
+        char distance[24];
+        if (km < 1) snprintf(distance, sizeof(distance), "%.1f km", km);
+        else snprintf(distance, sizeof(distance), "%ld km", lround(km));
+        if (isfinite(bearing)) {
+            static const char *const compass[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+            unsigned degrees = (unsigned)lround(bearing) % 360;
+            unsigned sector = (unsigned)((bearing + 22.5) / 45) % 8;
+            snprintf(value, sizeof(value), "%u° %s  %s", degrees, compass[sector], distance);
+        } else snprintf(value, sizeof(value), "--° --  %s", distance);
+    }
+    if (strcmp(path_text, value)) {
+        snprintf(path_text, sizeof(path_text), "%s", value);
+        lv_obj_invalidate(monitor_content);
+    }
+}
+
+/* Both parts use fixed buffers and one draw callback, without extra widgets. */
+static void draw_path(lv_event_t *event)
+{
+    lv_obj_t *screen = lv_event_get_target(event);
+    lv_area_t bounds;
+    lv_obj_get_coords(screen, &bounds);
+    for (unsigned part = 0; part < 2; ++part) {
+        const lv_font_t *font = part ? &lv_font_montserrat_14 : &fmo_channel_font;
+        const char *value = part ? path_text : location_text;
+        int first = INT32_MAX, last = INT32_MIN;
+        uint32_t index = 0;
+        while (value[index]) {
+            uint32_t code = lv_text_encoded_next(value, &index);
+            lv_font_glyph_dsc_t glyph;
+            if (!lv_font_get_glyph_dsc(font, &glyph, code, 0) || !glyph.box_h) continue;
+            int top = font->line_height - font->base_line - glyph.box_h - glyph.ofs_y;
+            if (top < first) first = top;
+            if (top + glyph.box_h > last) last = top + glyph.box_h;
+        }
+        if (first == INT32_MAX) continue;
+        lv_area_t area = {
+            .x1 = bounds.x1 + (part ? path_left : 12),
+            .x2 = bounds.x1 + (part ? 227 : path_left - 9),
+            .y1 = bounds.y1 + LOCATION_TOP + (LOCATION_HEIGHT - (last - first)) / 2 - first,
+        };
+        area.y2 = area.y1 + font->line_height - 1;
+        lv_draw_label_dsc_t dsc;
+        lv_draw_label_dsc_init(&dsc);
+        dsc.base.obj = screen;
+        dsc.base.id1 = part ? 0x50415448 : 0x504C4143; /* PATH / PLAC */
+        dsc.font = font;
+        dsc.color = lv_color_hex(MUTED);
+        dsc.text = value;
+        dsc.text_local = true;
+        lv_draw_label(lv_event_get_layer(event), &dsc, &area);
+    }
+}
+
 static void create_monitor(void)
 {
     /* Widgets are recreated after overlays; cached layout/date state must not
      * suppress the first render even when the network snapshot is unchanged. */
     callsign_layout_valid = false;
+    path_cache_valid = false;
+    path_left = 12;
     memset(qso_stamps, 0, sizeof(qso_stamps));
     memset(qso_present, 0, sizeof(qso_present));
     lv_obj_t *screen = rect(lv_screen_active(), 0, 0, 240, 320, BLACK);
@@ -586,7 +647,8 @@ static void create_monitor(void)
     lv_obj_set_style_text_align(channel_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(channel_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     center_ink(channel_label, 0, CHANNEL_HEIGHT, 'H');
-    qso_panel = rect(screen, 12, QSO_TOP, 216, 129, BLACK);
+    snprintf(location_text, sizeof(location_text), "--");
+    qso_panel = rect(screen, 12, QSO_TOP, 216, 107, BLACK);
     lv_obj_set_style_border_color(qso_panel, lv_color_hex(ORANGE), 0);
     lv_obj_set_style_border_width(qso_panel, 1, 0);
     lv_obj_set_style_radius(qso_panel, 8, 0);
@@ -601,6 +663,8 @@ static void create_monitor(void)
         center_ink(qso_labels[i], top, QSO_TEXT_HEIGHT, 'H');
         memcpy(qso_times[i], "---------- --:--:--", sizeof(qso_times[i]));
     }
+    snprintf(path_text, sizeof(path_text), "--° --  -- km");
+    lv_obj_add_event_cb(screen, draw_path, LV_EVENT_DRAW_MAIN_END, NULL);
     lv_obj_add_event_cb(qso_panel, draw_qso_times, LV_EVENT_DRAW_MAIN_END, NULL);
     air_label = label(screen, 12, AIR_TOP, 216, &fmo_channel_font, MUTED, "等待电台发言");
     center_ink(air_label, AIR_TOP, AIR_HEIGHT, 'H');
@@ -695,8 +759,30 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     const lv_font_t *small = setup ? &lv_font_montserrat_20 : &fmo_callsign_bold_20;
     /* A release retains the last speaker's grid; the next start replaces it,
      * including clearing it when that talker supplies no grid. */
-    const char *grid = !setup && live && s->last_speaker[0] ?
-        (s->location[0] ? s->location : s->grid) : "";
+    const char *grid = live && s->last_speaker[0] ? s->grid : "";
+    const char *location = live && s->last_speaker[0] && s->location[0] ? s->location : "--";
+    render_path(s, live);
+    char compact[FMO_LOCATION_MAX + 4];
+    fmo_location_short_name(location, compact, sizeof(compact));
+    lv_point_t place_size, path_size;
+    lv_text_get_size(&place_size, compact, &fmo_channel_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_text_get_size(&path_size, path_text, &lv_font_montserrat_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int available = 216 - path_size.x - 8;
+    /* Keep bearing/distance complete and shorten only at UTF-8 boundaries. */
+    if (place_size.x > available) {
+        size_t length = strlen(compact);
+        do {
+            do { --length; } while (length && ((unsigned char)compact[length] & 0xc0) == 0x80);
+            memcpy(compact + length, "...", 4);
+            lv_text_get_size(&place_size, compact, &fmo_channel_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        } while (length && place_size.x > available);
+    }
+    int next_path_left = 12 + place_size.x + 8;
+    if (strcmp(location_text, compact) || path_left != next_path_left) {
+        snprintf(location_text, sizeof(location_text), "%s", compact);
+        path_left = next_path_left;
+        lv_obj_invalidate(monitor_content);
+    }
     bool grid_changed = text(grid_label, grid);
     if (!callsign_layout_valid || call_changed || grid_changed || setup != callsign_setup) {
         lv_point_t grid_size = {0}, size;
@@ -711,15 +797,13 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
             lv_text_get_size(&size, call, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         int call_width = grid[0] && size.x < call_space ? size.x : call_space;
         lv_obj_set_width(callsign_label, call_width);
-        int ink_bottom = center_ink(callsign_label, CALLSIGN_TOP, 32, 'H');
+        center_ink(callsign_label, CALLSIGN_TOP, 32, 'H');
         if (grid[0]) {
             lv_obj_remove_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_x(grid_label, 12 + call_width + 8);
             lv_obj_set_width(grid_label, grid_size.x);
-            int grid_bottom = center_ink(grid_label, CALLSIGN_TOP, 32, 'H');
-            if (grid_bottom > ink_bottom) ink_bottom = grid_bottom;
+            center_ink(grid_label, CALLSIGN_TOP, 32, 'H');
         } else lv_obj_add_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
-        position_audio_bar(ink_bottom);
         callsign_layout_valid = true;
         callsign_setup = setup;
     }

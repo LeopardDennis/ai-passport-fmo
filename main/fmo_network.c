@@ -60,6 +60,8 @@ static bool s_clock_initialized, s_clock_online;
 static bool s_query_pending;
 static bool s_station_draining, s_station_prepared;
 static uint64_t s_query_ms;
+static bool s_position_pending;
+static uint64_t s_position_query_ms, s_position_next_ms;
 static unsigned s_events_stack_min = UINT32_MAX;
 static unsigned s_control_stack_min = UINT32_MAX;
 
@@ -109,6 +111,9 @@ static void post_update(const fmo_update_t *update)
     case FMO_UPDATE_CONTROL_LINK:
         fmo_monitor_set_control(state, update->connected && state->wifi_connected);
         s_query_pending = false;
+        s_position_pending = false;
+        s_position_next_ms = 0;
+        state->local_position_valid = false;
         if (!update->connected && !s_station_draining)
             fmo_stations_disconnect(&s_snapshot.stations);
         refresh = update->connected;
@@ -215,7 +220,7 @@ static void invalidate_live_message(void)
 }
 
 /* History is informational: invalid entries never clear the live talker/channel.
- * Select the newest three by timestamp even if a future server changes ordering. */
+ * Select the newest two by timestamp even if a future server changes ordering. */
 static void parse_fmo_history(const cJSON *data)
 {
     if (!cJSON_IsArray(data)) return;
@@ -271,6 +276,29 @@ static void parse_station_list(const cJSON *data)
     fmo_network_request_refresh();
 }
 
+/* Coordinates are optional metadata with a distinct response type. Invalid or
+ * late replies must never invalidate the live callsign or channel transaction. */
+static void parse_local_position(const cJSON *data, bool malformed)
+{
+    fmo_position_t position = {0};
+    const cJSON *lat = cJSON_GetObjectItemCaseSensitive(data, "latitude");
+    const cJSON *lon = cJSON_GetObjectItemCaseSensitive(data, "longitude");
+    bool valid = !malformed && cJSON_IsNumber(lat) && cJSON_IsNumber(lon) &&
+        fmo_location_coordinates(lat->valuedouble, lon->valuedouble, &position) &&
+        (position.lat_e6 != 0 || position.lon_e6 != 0);
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if (s_position_pending && now_ms() - s_position_query_ms < FMO_POSITION_TIMEOUT_MS &&
+        s_snapshot.state.wifi_connected && s_snapshot.state.control_connected &&
+        !atomic_load(&s_setup_requested) && !atomic_load(&s_setup_active)) {
+        s_position_pending = false;
+        s_position_next_ms = now_ms() + FMO_POSITION_REFRESH_MS;
+        s_snapshot.state.local_position_valid = valid;
+        s_snapshot.state.local_position = position;
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+    }
+    xSemaphoreGive(s_state_lock);
+}
+
 static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
 {
     cJSON *root = cJSON_ParseWithOpts(payload, NULL, true);
@@ -285,6 +313,12 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
     const cJSON *sub_type = cJSON_GetObjectItemCaseSensitive(root, "subType");
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
     if (!cJSON_IsString(type) || !cJSON_IsString(sub_type)) {
+        cJSON_Delete(root);
+        return;
+    }
+    if (kind == FMO_SOCKET_CONTROL && !strcmp(type->valuestring, "config") &&
+        !strcmp(sub_type->valuestring, "getCordinateResponse")) {
+        parse_local_position(data, fmo_text_json_has_nul(payload));
         cJSON_Delete(root);
         return;
     }
@@ -447,6 +481,46 @@ static bool request_current_channel(void)
         return true; // A partially sent query also has ambiguous reply ownership.
     }
     return false;
+}
+
+/* Run only in the coordinator, before normal channel polling. There is at most
+ * one optional coordinate request in flight; its response type is independent.
+ * A timeout disables these reads until reconnect so a late reply can never be
+ * mistaken for a later request. Unsupported firmware keeps normal audio/PTT. */
+static void request_local_position(void)
+{
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    uint64_t now = now_ms();
+    if (s_position_pending && now - s_position_query_ms >= FMO_POSITION_TIMEOUT_MS) {
+        s_position_pending = false;
+        s_position_next_ms = UINT64_MAX;
+        s_snapshot.state.local_position_valid = false;
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+    }
+    bool ready = !s_position_pending && now >= s_position_next_ms &&
+        s_snapshot.state.wifi_connected && s_snapshot.state.control_connected &&
+        s_snapshot.state.channel_valid && !s_query_pending &&
+        s_snapshot.stations.request == FMO_STATION_NONE && !s_snapshot.stations.audio_paused &&
+        !atomic_load(&s_setup_requested) && !atomic_load(&s_setup_active);
+    if (!ready || !s_control_socket.client ||
+        !esp_websocket_client_is_connected(s_control_socket.client)) {
+        xSemaphoreGive(s_state_lock);
+        return;
+    }
+    s_position_pending = true;
+    s_position_query_ms = now;
+    xSemaphoreGive(s_state_lock);
+    static const char request[] = "{\"type\":\"config\",\"subType\":\"getCordinate\",\"data\":{}}";
+    int sent = esp_websocket_client_send_text(s_control_socket.client, request,
+        sizeof(request) - 1, pdMS_TO_TICKS(FMO_LINK_IO_TIMEOUT_MS));
+    if (sent != sizeof(request) - 1) {
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        s_position_pending = false;
+        s_position_next_ms = UINT64_MAX;
+        s_snapshot.state.local_position_valid = false;
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+        xSemaphoreGive(s_state_lock);
+    }
 }
 
 /* /ws has no request IDs. List/set transactions own it exclusively;
@@ -962,6 +1036,7 @@ static void network_task(void *argument)
                 err = start_socket(&s_control_socket, control_uri);
                 if (err != ESP_OK) ESP_LOGW(TAG, "Control client creation failed; retrying");
             }
+            request_local_position();
             if (request_station_control()) {
                 post_link(FMO_UPDATE_CONTROL_LINK, false);
                 stop_socket(&s_control_socket);

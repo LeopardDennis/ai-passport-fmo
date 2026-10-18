@@ -10,6 +10,9 @@
 #define FMO_LINK_PONG_TIMEOUT_SEC 30
 #define FMO_CHANNEL_QUERY_TIMEOUT_MS 10000
 #define FMO_CHANNEL_MAX_AGE_MS 15000
+/* Optional coordinate reads never block channel polling or force reconnection. */
+#define FMO_POSITION_REFRESH_MS 60000
+#define FMO_POSITION_TIMEOUT_MS 10000
 
 /* Library reconnects normally suffice. Bound a failed startup/session even
  * when its client handle still exists; the coordinator then refreshes DNS and

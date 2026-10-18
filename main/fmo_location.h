@@ -21,6 +21,10 @@ typedef struct {
 /* WGS84 decimal degrees, or the center of a 4/6/8-character Maidenhead cell. */
 bool fmo_location_coordinates(double lat, double lon, fmo_position_t *out);
 bool fmo_location_grid(const char *grid, fmo_position_t *out);
+/* Great-circle distance and initial true-north bearing from origin to target.
+ * An undefined bearing (coincident/antipodal points or polar origin) is NAN. */
+bool fmo_location_path(fmo_position_t origin, fmo_position_t target,
+                       double *distance_km, double *bearing_deg);
 /* NULL = miss; empty name = negative cache hit. */
 const fmo_location_entry_t *fmo_location_find(const fmo_location_cache_t *cache,
                                             fmo_position_t position, uint64_t now);
@@ -29,3 +33,6 @@ unsigned fmo_location_store(fmo_location_cache_t *cache, fmo_position_t position
 bool fmo_location_entry_valid(const fmo_location_entry_t *entry);
 /* Photon JSON parser; no network or platform dependencies. */
 bool fmo_location_parse_response(const char *json, char *name, size_t capacity);
+
+/* Compact display name; the original geocoder/cache value is unchanged. */
+void fmo_location_short_name(const char *name, char *out, size_t capacity);

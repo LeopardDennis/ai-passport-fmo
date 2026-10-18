@@ -6,6 +6,23 @@
 
 ## Unreleased
 
+- Reduce the QSO history from three records to two and shorten its frame.
+  Show the speaker details above the yellow audio bar, outside the QSO frame. Restore the original grid
+  code beside the callsign. Missing places show `--`; release retains the last
+  place, while a new speaker or lost live connection clears it. Update parser
+  and native UI regressions, including long names and menu restoration.
+- Equalize visible spacing in the speaker details and QSO rows, with eight clear pixels
+  on both sides of the yellow audio bar.
+- Combine short place name, true-north bearing, and distance on one line above the audio bar
+  and outside QSO. Shorten common Chinese administrative names, including Inner Mongolia;
+  reserve the complete bearing/distance width and ellipsize only the place when needed.
+  Read the configured FMO origin with isolated, bounded `getCordinate` queries;
+  prefer speaker coordinates and fall back to grid-center estimates, using the same
+  display format without a prefix. Missing
+  origins/targets and undefined directions show placeholders. Draw fixed text
+  without another LVGL widget and avoid repeated redraws for clipped place names.
+  Cover geometry, coordinate response isolation/timeouts and native layouts.
+
 - Show cached short place names beside callsigns using asynchronous, verified HTTPS Photon lookup, with grid fallback, optional WGS84 coordinates, bounded persistent cache/backoff and stale-result isolation. Keep long names on one line and retain places after PTT release. Add coordinate/cache/parser/state/layout tests and OpenStreetMap attribution. Center the setup QR title and browser address. Physical query latency and audio coexistence remain unverified.
 
 - Match the station-list current-item marker to the saved Wi-Fi list: use a fixed right-side check mark, black on the selected row and orange otherwise. Reserve space beside station names so scrolling text cannot overlap the marker.

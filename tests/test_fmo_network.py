@@ -33,7 +33,7 @@ def run():
     header = (ROOT / "main/fmo_network.h").read_text()
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
-        "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_station_list", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
+        "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_station_list", "parse_local_position", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_local_position", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
     functions += "\n" + source[source.index("void fmo_network_request_retry(void)"):source.index("bool fmo_network_get_saved_wifi(")]
     functions += "\n" + source[source.index("bool fmo_network_location_snapshot("):]
     preamble = r'''
@@ -69,6 +69,8 @@ static bool s_station_draining, s_station_prepared;
 static fmo_link_recovery_t s_events_recovery, s_control_recovery;
 static uint32_t s_speaker_revision, s_query_revision;
 static uint64_t clock_ms = 10000, s_query_ms;
+static bool s_position_pending;
+static uint64_t s_position_query_ms, s_position_next_ms;
 static bool s_clock_initialized, s_clock_online;
 static uint64_t now_ms(void) { return clock_ms; }
 #define pdMS_TO_TICKS(x) (x)
@@ -169,6 +171,77 @@ static void query(void) { s_query_pending = true; s_query_revision = s_speaker_r
 #define CHANNEL42 "{\"type\":\"station\",\"subType\":\"getCurrentResponse\",\"data\":{\"uid\":42,\"name\":\"安吉FMO中继\"}}"
 #define CHANNEL43 "{\"type\":\"station\",\"subType\":\"getCurrentResponse\",\"data\":{\"uid\":43,\"name\":\"上海\"}}"
 #define START "{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"BG5ESN\",\"isSpeaking\":true,\"grid\":\"PM01\"}}"
+static void test_local_position(void) {
+    memset(&s_snapshot,0,sizeof(s_snapshot));
+    s_control_socket.client=1; short_send=0; clock_ms=2000000;
+    atomic_store(&s_setup_active,false); atomic_store(&s_setup_requested,false);
+    post_link(FMO_UPDATE_WIFI,true); post_link(FMO_UPDATE_EVENTS_LINK,true);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query(); parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    parse_fmo_message(FMO_SOCKET_EVENTS,START);
+    const char *origin="{\"type\":\"config\",\"subType\":\"getCordinateResponse\",\"data\":{\"latitude\":23,\"longitude\":113.2}}";
+    int count=sends;
+    query(); request_local_position(); assert(sends==count); // Channel owns priority.
+    parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    request_local_position();
+    assert(sends==count+1 && s_position_pending && strstr(last_request,"getCordinate"));
+    request_local_position(); assert(sends==count+1);
+    parse_fmo_message(FMO_SOCKET_EVENTS,origin);
+    assert(s_position_pending && !s_snapshot.state.local_position_valid);
+    query(); // Channel response can be in flight independently.
+    fmo_monitor_state_t before=s_snapshot.state;
+    parse_fmo_message(FMO_SOCKET_CONTROL,origin);
+    assert(s_query_pending && !s_position_pending && published.state.local_position_valid);
+    assert(published.state.local_position.lat_e6==23000000 && published.state.local_position.lon_e6==113200000);
+    fmo_monitor_state_t after=published.state;
+    after.local_position_valid=before.local_position_valid;
+    after.local_position=before.local_position;
+    assert(!memcmp(&before,&after,sizeof(before)));
+    parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    request_local_position(); assert(sends==count+1); // Rate limit.
+    clock_ms+=FMO_POSITION_REFRESH_MS;
+    s_snapshot.stations.request=FMO_STATION_LIST_QUEUED;
+    request_local_position(); assert(sends==count+1);
+    s_snapshot.stations.request=FMO_STATION_NONE;
+    atomic_store(&s_setup_active,true);request_local_position();assert(sends==count+1);
+    atomic_store(&s_setup_active,false);
+    request_local_position(); assert(sends==count+2);
+    parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"config\",\"subType\":\"getCordinateResponse\",\"data\":{\"latitude\":0,\"longitude\":0}}");
+    assert(!published.state.local_position_valid && published.state.speaking && published.state.channel_valid);
+    const char *bad[]={
+        "{\"latitude\":91,\"longitude\":0}","{\"latitude\":1,\"longitude\":181}",
+        "{\"latitude\":\"23\",\"longitude\":113}","{\"latitude\":23}","null", "[]",
+        "{\"latitude\":23,\"longitude\":113,\"extra\":\"bad\\u0000text\"}"};
+    for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);++i) {
+        clock_ms+=FMO_POSITION_REFRESH_MS;
+        request_local_position();assert(s_position_pending);
+        char response[256];snprintf(response,sizeof(response),
+            "{\"type\":\"config\",\"subType\":\"getCordinateResponse\",\"data\":%s}",bad[i]);
+        parse_fmo_message(FMO_SOCKET_CONTROL,response);
+        assert(!s_position_pending && !published.state.local_position_valid);
+        assert(published.state.speaking && published.state.channel_valid);
+    }
+    clock_ms+=FMO_POSITION_REFRESH_MS;request_local_position();
+    clock_ms+=FMO_POSITION_TIMEOUT_MS;request_local_position();
+    assert(!s_position_pending && s_position_next_ms==UINT64_MAX);
+    count=sends; clock_ms+=FMO_POSITION_REFRESH_MS; request_local_position();assert(sends==count);
+    parse_fmo_message(FMO_SOCKET_CONTROL,origin);assert(!published.state.local_position_valid);
+    assert(s_snapshot.state.control_connected && s_snapshot.state.speaking);
+    post_link(FMO_UPDATE_CONTROL_LINK,false);post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    request_local_position();parse_fmo_message(FMO_SOCKET_CONTROL,origin);
+    assert(published.state.local_position_valid);
+    clock_ms+=FMO_POSITION_REFRESH_MS;short_send=1;request_local_position();short_send=0;
+    assert(!published.state.local_position_valid && s_position_next_ms==UINT64_MAX);
+    assert(published.state.speaking && published.state.channel_valid && !s_query_pending);
+    post_link(FMO_UPDATE_CONTROL_LINK,false);post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    request_local_position();parse_fmo_message(FMO_SOCKET_CONTROL,origin);
+    post_link(FMO_UPDATE_WIFI,false);
+    assert(!published.state.local_position_valid);
+    puts("FMO local coordinates: PASS (origin, isolated replies, priority, rate limit, invalid/default values, timeout, reconnect)");
+}
+
 static void test_metadata_recovery(void) {
     memset(&s_snapshot,0,sizeof(s_snapshot));
     memset(&s_events_recovery,0,sizeof(s_events_recovery));
@@ -519,7 +592,7 @@ int main(void) {
     assert(!strcmp(published.state.history.entries[0].callsign,"REPEAT"));
     assert(!strcmp(published.state.history.entries[1].callsign,"REPEAT"));
     assert(published.state.history.entries[0].timestamp==1767272280);
-    assert(!strcmp(published.state.history.entries[FMO_HISTORY_COUNT-1].callsign,"THIRD"));
+    assert(published.state.history.entries[1].timestamp==1767272200);
     assert(published.state.speaking && published.state.channel_valid && s_query_pending);
     assert(s_speaker_revision==live_revision && refreshes==before_hist);
     fmo_history_t good_history=published.state.history;
@@ -699,7 +772,8 @@ int main(void) {
     assert(!fmo_network_location_snapshot(&place_request));
     atomic_store(&s_setup_requested,false);
     test_metadata_recovery();
-    puts("FMO network parser: PASS (cross-server flags/color lifecycle, recent-three history/sorting/isolation, large history receive/fragmentation, local profile exclusion, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");
+    test_local_position();
+    puts("FMO network parser: PASS (cross-server flags/color lifecycle, recent-two history/sorting/isolation, large history receive/fragmentation, local profile exclusion, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");
 }
 '''
     with tempfile.TemporaryDirectory(prefix="fmo-network-test-") as tmp:

@@ -8,7 +8,7 @@
 #define FMO_CHANNEL_NAME_MAX 31
 #define FMO_GRID_MAX 11
 
-#define FMO_HISTORY_COUNT 3
+#define FMO_HISTORY_COUNT 2
 typedef struct {
     char callsign[FMO_CALLSIGN_MAX + 1];
     int64_t timestamp;
@@ -37,6 +37,8 @@ typedef struct {
     char grid[FMO_GRID_MAX + 1];
     bool position_valid;
     fmo_position_t position;
+    bool local_position_valid;
+    fmo_position_t local_position;
     char location[FMO_LOCATION_MAX + 1];
 } fmo_monitor_state_t;
 

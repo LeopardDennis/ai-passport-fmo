@@ -30,6 +30,7 @@ void fmo_monitor_set_wifi(fmo_monitor_state_t *state, bool connected)
         memset(&state->history, 0, sizeof(state->history));
         state->events_connected = false;
         state->control_connected = false;
+        state->local_position_valid = false;
         state->speaking = false;
         state->speaker_cross_server = false;
         state->speaker[0] = '\0';
@@ -60,6 +61,7 @@ void fmo_monitor_set_control(fmo_monitor_state_t *state, bool connected)
     if (!state) return;
     state->control_connected = connected;
     if (!connected) {
+        state->local_position_valid = false;
         state->channel_valid = false;
     }
 }

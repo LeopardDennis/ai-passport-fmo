@@ -31,6 +31,32 @@ bool fmo_location_grid(const char *grid, fmo_position_t *out)
     return fmo_location_coordinates(lat + dy / 2, lon + dx / 2, out);
 }
 
+bool fmo_location_path(fmo_position_t origin, fmo_position_t target,
+                       double *distance_km, double *bearing_deg)
+{
+    if (!distance_km || !bearing_deg) return false;
+    *distance_km = *bearing_deg = NAN;
+    if (origin.lat_e6 < -90000000 || origin.lat_e6 > 90000000 ||
+        target.lat_e6 < -90000000 || target.lat_e6 > 90000000 ||
+        origin.lon_e6 < -180000000 || origin.lon_e6 > 180000000 ||
+        target.lon_e6 < -180000000 || target.lon_e6 > 180000000) return false;
+    const double radians = 0.017453292519943295;
+    double lat1 = origin.lat_e6 * radians / 1000000.0;
+    double lat2 = target.lat_e6 * radians / 1000000.0;
+    double delta_lat = lat2 - lat1;
+    double delta_lon = ((double)target.lon_e6 - origin.lon_e6) * radians / 1000000.0;
+    double a = sin(delta_lat / 2) * sin(delta_lat / 2) +
+        cos(lat1) * cos(lat2) * sin(delta_lon / 2) * sin(delta_lon / 2);
+    if (a < 0) a = 0;
+    if (a > 1) a = 1;
+    *distance_km = 2 * 6371.0088 * atan2(sqrt(a), sqrt(1 - a));
+    double y = sin(delta_lon) * cos(lat2);
+    double x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(delta_lon);
+    if (fabs(cos(lat1)) > 1e-12 && hypot(x, y) > 1e-12)
+        *bearing_deg = fmod(atan2(y, x) / radians + 360, 360);
+    return true;
+}
+
 static bool equal(fmo_position_t a, fmo_position_t b)
 {
     return a.lat_e6 == b.lat_e6 && a.lon_e6 == b.lon_e6;
@@ -68,4 +94,29 @@ bool fmo_location_entry_valid(const fmo_location_entry_t *entry)
            p.lon_e6 >= -180000000 && p.lon_e6 <= 180000000 &&
            memchr(entry->name, 0, sizeof(entry->name)) && entry->name[0] &&
            fmo_text_copy_utf8(checked, sizeof(checked), entry->name);
+}
+
+void fmo_location_short_name(const char *name, char *out, size_t capacity)
+{
+    if (!out || !capacity) return;
+    char compact[FMO_LOCATION_MAX + 1];
+    if (!fmo_text_copy_utf8(compact, sizeof(compact), name)) compact[0] = 0;
+    static const struct { const char *full, *short_name; } regions[] = {
+        {"内蒙古自治区", "内蒙古"}, {"广西壮族自治区", "广西"},
+        {"宁夏回族自治区", "宁夏"}, {"新疆维吾尔自治区", "新疆"},
+        {"西藏自治区", "西藏"}, {"香港特别行政区", "香港"},
+        {"澳门特别行政区", "澳门"},
+    };
+    for (unsigned i = 0; i < sizeof(regions) / sizeof(regions[0]); ++i) {
+        size_t full = strlen(regions[i].full), short_len = strlen(regions[i].short_name);
+        if (!strncmp(compact, regions[i].full, full)) {
+            memmove(compact + short_len, compact + full, strlen(compact + full) + 1);
+            memcpy(compact, regions[i].short_name, short_len);
+            break;
+        }
+    }
+    size_t length = strlen(compact);
+    if (length > 3 && (!strcmp(compact + length - 3, "市") ||
+                       !strcmp(compact + length - 3, "省"))) compact[length - 3] = 0;
+    fmo_text_copy_utf8(out, capacity, compact);
 }
