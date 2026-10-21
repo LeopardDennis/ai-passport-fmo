@@ -88,10 +88,10 @@ static void apply_input(const app_input_t *input)
     }
     fmo_key_t key;
     // Main-screen shortcuts share OK with the existing submenu return gesture.
-    if (input->event == BSP_BTN_LONG && button == BSP_BTN_UP &&
-        s_controls.view == FMO_VIEW_MONITOR) key = FMO_KEY_BACK;
-    else if (input->event == BSP_BTN_LONG && button == BSP_BTN_OK)
-        key = s_controls.view == FMO_VIEW_MONITOR ? FMO_KEY_STATIONS : FMO_KEY_BACK;
+    if (input->event == BSP_BTN_LONG && button == BSP_BTN_OK)
+        key = FMO_KEY_BACK;
+    else if (input->event == BSP_BTN_LONG && s_controls.view == FMO_VIEW_STATIONS)
+        key = button == BSP_BTN_UP ? FMO_KEY_PAGE_UP : FMO_KEY_PAGE_DOWN;
     else if (input->event == BSP_BTN_CLICK) key = button == BSP_BTN_UP ? FMO_KEY_UP :
         button == BSP_BTN_DOWN ? FMO_KEY_DOWN : FMO_KEY_OK;
     else return;

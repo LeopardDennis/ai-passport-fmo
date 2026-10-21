@@ -171,6 +171,46 @@ static void query(void) { s_query_pending = true; s_query_revision = s_speaker_r
 #define CHANNEL42 "{\"type\":\"station\",\"subType\":\"getCurrentResponse\",\"data\":{\"uid\":42,\"name\":\"安吉FMO中继\"}}"
 #define CHANNEL43 "{\"type\":\"station\",\"subType\":\"getCurrentResponse\",\"data\":{\"uid\":43,\"name\":\"上海\"}}"
 #define START "{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"BG5ESN\",\"isSpeaking\":true,\"grid\":\"PM01\"}}"
+static void test_station_total(void) {
+    memset(&s_snapshot,0,sizeof(s_snapshot));s_query_pending=false;short_send=0;
+    s_control_socket.client=1;clock_ms=3000000;
+    post_link(FMO_UPDATE_WIFI,true);post_link(FMO_UPDATE_EVENTS_LINK,true);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    assert(fmo_stations_load(&s_snapshot.stations,0,clock_ms));
+    fmo_stations_begin_count(&s_snapshot.stations,clock_ms);
+    unsigned probes=0;
+    while(s_snapshot.stations.counting) {
+        uint32_t index=s_snapshot.stations.count_probe;
+        assert(!request_station_control());
+        assert(s_snapshot.stations.request==FMO_STATION_LIST_WAIT);
+        assert(strstr(last_request,"\"count\":1"));
+        int before=sends;assert(!request_station_control() && sends==before);
+        const char *reply=index<162 ?
+            "{\"type\":\"station\",\"subType\":\"getListResponse\",\"data\":{\"count\":999,\"list\":[{\"uid\":42,\"name\":\"probe\"}]}}" :
+            "{\"type\":\"station\",\"subType\":\"getListResponse\",\"data\":{\"count\":999,\"list\":[]}}";
+        parse_fmo_message(FMO_SOCKET_EVENTS,reply);
+        assert(s_snapshot.stations.request==FMO_STATION_LIST_WAIT);
+        parse_fmo_message(FMO_SOCKET_CONTROL,reply);
+        assert(!s_snapshot.stations.count && !s_snapshot.stations.audio_paused);
+        assert(++probes<=32);clock_ms+=10;
+    }
+    assert(s_snapshot.stations.total_known && s_snapshot.stations.total==162);
+    assert(!request_station_control());
+    assert(strstr(last_request,"\"start\":0") && strstr(last_request,"\"count\":7"));
+    // An outdated total is corrected by a shorter actual final page.
+    parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"station\",\"subType\":\"getListResponse\",\"data\":{\"list\":[{\"uid\":42,\"name\":\"only\"}]}}");
+    assert(published.stations.count==1 && published.stations.total==1);
+    assert(published.stations.total_known && published.stations.request==FMO_STATION_NONE);
+    assert(fmo_stations_load(&s_snapshot.stations,0,clock_ms));
+    fmo_stations_begin_count(&s_snapshot.stations,clock_ms);
+    clock_ms+=FMO_STATION_COUNT_BUDGET_MS;
+    assert(!request_station_control());
+    assert(!s_snapshot.stations.counting && !s_snapshot.stations.total_known);
+    assert(strstr(last_request,"\"count\":7"));
+    puts("FMO station total: PASS (bounded probes, reply ownership, ignored range count, page fallback)");
+}
+
 static void test_local_position(void) {
     memset(&s_snapshot,0,sizeof(s_snapshot));
     s_control_socket.client=1; short_send=0; clock_ms=2000000;
@@ -772,6 +812,7 @@ int main(void) {
     assert(!fmo_network_location_snapshot(&place_request));
     atomic_store(&s_setup_requested,false);
     test_metadata_recovery();
+    test_station_total();
     test_local_position();
     puts("FMO network parser: PASS (cross-server flags/color lifecycle, recent-two history/sorting/isolation, large history receive/fragmentation, local profile exclusion, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");
 }

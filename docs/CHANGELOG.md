@@ -6,6 +6,18 @@
 
 ## Unreleased
 
+- Show city plus district/county in the speaker location row, handle municipality and inverted administrative fields, shorten suffixes for display, and refresh legacy single-region caches. Add long-UP/DOWN station paging with row retention and bounded first/last-page behavior; cover parsing, button routing and native layout.
+
+- Reduce place-name latency: rate-limit request starts to three seconds instead of waiting 15 seconds after completion, shorten failed-coordinate caching to 30 seconds, and use bounded exponential failure backoff with a 60-second minimum for HTTP 429/503. Preserve immediate cache access during cooldowns and fill empty cache slots before evicting persisted places. Add duration/cache-hit logs and timing regressions for speaker changes, slow connections, temporary failures and throttling.
+
+- Fix place lookups being permanently deferred at the measured 59,724-byte idle heap. Enable on-demand TLS buffers with a 1 KiB outgoing record and retain the full 16 KiB incoming limit; allocate the response body after the handshake. Use a 56 KiB free-heap gate only with this compact TLS configuration, retaining 64 KiB for custom builds and a 32 KiB contiguous-block check. Cover measured heap, boundary conditions, fragmentation and fallback configurations.
+
+- Start the geocoder body-read deadline after TLS connection and HTTP headers, so a slow handshake cannot discard an otherwise valid response. Add rate-limited clock/heap wait diagnostics and HTTP/body/parser failure logs without speaker identities or coordinates. Cover slow connection with a host regression.
+
+- Open the station list with short OK and Wi-Fi network settings with long OK on the home screen. Remove the home long-UP shortcut while preserving boot Recovery and subpage return. Keep callsigns at 32 px with scrolling for overflow, and start audio at 80%.
+
+- Show selected station index/total instead of a trailing plus. Refresh totals with bounded one-row probes on opening the first page, reuse between pages, and keep ordinary paging available when counting fails. Preserve audio and serialize replies with existing station requests.
+
 - Reduce the QSO history from three records to two and shorten its frame.
   Show the speaker details above the yellow audio bar, outside the QSO frame. Restore the original grid
   code beside the callsign. Missing places show `--`; release retains the last

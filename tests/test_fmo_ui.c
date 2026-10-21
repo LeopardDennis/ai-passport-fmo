@@ -674,6 +674,11 @@ int main(int argc, char **argv)
             controls.stations.rows[i].uid=42+i;
             snprintf(controls.stations.rows[i].name,48,"%s",names[i]);
         }
+        controls.stations.total=162;controls.stations.total_known=true;
+        if (!strcmp(argv[1],"stations_total_unknown")) controls.stations.total_known=false;
+        if (!strcmp(argv[1],"stations_total_max")) {
+            controls.stations.start=65529;controls.stations.total=65535;
+        }
         if (!strcmp(argv[1],"stations_long")) {
             fmo_text_copy_utf8(controls.stations.rows[1].name, sizeof(controls.stations.rows[1].name),"全国业余无线电通联测试超长台站名称");
             controls.stations.start=6;
@@ -685,7 +690,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[1],"stations_error")) controls.stations.status=FMO_STATIONS_LOAD_FAILED;
         if (!strcmp(argv[1],"stations_empty")) {
             controls.stations.status=FMO_STATIONS_EMPTY;
-            controls.stations.count=0;
+            controls.stations.count=0;controls.stations.total=0;
         }
         if (!strcmp(argv[1],"stations_loading")) {
             controls.stations.status=FMO_STATIONS_LOADING;
@@ -732,6 +737,7 @@ int main(int argc, char **argv)
         state.local_position = (fmo_position_t){23000000,113200000};
         fmo_monitor_set_position(&state, true, (fmo_position_t){23061900,113104000});
         strcpy(state.location, "佛山市");
+        if (!strcmp(argv[1], "path_city_area")) strcpy(state.location, "佛山市 南海区");
         if (!strcmp(argv[1], "path_region")) strcpy(state.location, "内蒙古自治区");
         if (!strcmp(argv[1], "path_grid")) state.position_valid = false;
         if (!strcmp(argv[1], "path_missing")) state.local_position_valid = false;
@@ -786,6 +792,7 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[1], "path_max")) assert(!strcmp(value, "225° SW  20015 km"));
         else assert(!strcmp(value, "305° NW  12 km"));
+        if (!strcmp(argv[1], "path_city_area")) verify_place(display, "佛山 南海");
         if (!strcmp(argv[1], "path_region")) verify_place(display, "内蒙古");
         verify("OL63NB", 0x929292);
         lv_refr_now(display);
@@ -858,6 +865,36 @@ int main(int argc, char **argv)
         assert(lv_obj_get_style_text_font(hint,0)==fmo_wifi_font());
         assert(lv_obj_get_height(hint)==fmo_wifi_font()->line_height);
     }
+    if (argc>1 && !strncmp(argv[1],"stations",8) && controls.stations.count) {
+        char range[64];
+        if(controls.stations.total_known) snprintf(range,sizeof(range),"%lu/%lu",
+            (unsigned long)controls.stations.start+controls.selection+1,
+            (unsigned long)controls.stations.total);
+        else snprintf(range,sizeof(range),"%lu/--",
+            (unsigned long)controls.stations.start+controls.selection+1);
+        lv_obj_t *page=find_text(lv_screen_active(),range);assert(page);
+        lv_point_t size;lv_text_get_size(&size,range,&lv_font_montserrat_14,lv_obj_get_style_text_letter_space(page,0),0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        assert(size.x<=132);
+        lv_obj_update_layout(lv_screen_active());
+        lv_area_t bounds;lv_obj_get_coords(page,&bounds);
+        assert(bounds.x1==96 && bounds.x2==227);
+        if (!strcmp(argv[1], "stations")) {
+            unsigned saved_selection = controls.selection;
+            const char *indices[] = {"1/162", "2/162", "3/162"};
+            for (unsigned i = 0; i < 3; ++i) {
+                controls.selection = i;
+                fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
+                assert(find_text(lv_screen_active(), indices[i]));
+            }
+            controls.stations.start = 6;
+            controls.selection = 0;
+            fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
+            assert(find_text(lv_screen_active(), "7/162"));
+            controls.stations.start = 0;
+            controls.selection = saved_selection;
+            fmo_ui_render(&state, "", "", "", 82, 12000, false, &controls);
+        }
+    }
     uint8_t preview_level = 0;
     if (meter_preview) preview_level = !strcmp(argv[1], "meter_low") ? 20 :
                                       !strcmp(argv[1], "meter_mid") ? 55 : 95;
@@ -868,7 +905,7 @@ int main(int argc, char **argv)
         verify_dates(display,"---------- --:--:--","---------- --:--:--");
     }
     if (argc > 1 && !strcmp(argv[1], "long"))
-        assert(lv_obj_get_style_text_font(find_text(lv_screen_active(), state.last_speaker), 0) == &fmo_callsign_bold_20);
+        assert(lv_obj_get_style_text_font(find_text(lv_screen_active(), state.last_speaker), 0) == &fmo_callsign_bold_32);
     lv_obj_update_layout(lv_screen_active());
     lv_refr_now(display);
     verify_clock_center();
@@ -912,7 +949,7 @@ int main(int argc, char **argv)
         verify_callsign_center(116);
     }
     if (controls.view == FMO_VIEW_MONITOR && !ssid[0]) {
-        const char *footer = "长按确认: 切换台站 长按上: 网络";
+        const char *footer = "确认: 台站列表 长按确认: 配网";
         lv_obj_t *hint = find_text(lv_screen_active(), footer);
         assert(hint);
         lv_point_t size;
@@ -935,7 +972,7 @@ int main(int argc, char **argv)
         verify("台站列表",0xFF8A00);
         const char *footer=controls.stations.audio_paused || controls.stations.status==FMO_STATIONS_LOADING ?
             "长按确认: 返回" : controls.stations.status==FMO_STATIONS_LOAD_FAILED || controls.stations.status==FMO_STATIONS_EMPTY ?
-            "确认: 重试 长按确认: 返回" : "上/下: 选择 长按确认: 返回";
+            "确认: 重试 长按确认: 返回" : "长按上下翻页 长按确认返回";
         verify(footer,0x929292);
         lv_obj_t *hint=find_text(lv_screen_active(),footer);
         lv_point_t size;

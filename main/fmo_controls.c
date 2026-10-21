@@ -30,6 +30,18 @@ fmo_action_t fmo_controls_key(fmo_controls_t *c, fmo_key_t key)
     if (c->view == FMO_VIEW_STATIONS) {
         if (key == FMO_KEY_BACK) { c->view = FMO_VIEW_MONITOR; return FMO_ACTION_NONE; }
         if (c->stations.request != FMO_STATION_NONE) return FMO_ACTION_NONE;
+        if (key == FMO_KEY_PAGE_UP || key == FMO_KEY_PAGE_DOWN) {
+            if (key == FMO_KEY_PAGE_UP && c->stations.start) {
+                c->stations.start = c->stations.start >= FMO_STATION_PAGE_SIZE ?
+                    c->stations.start - FMO_STATION_PAGE_SIZE : 0;
+                return FMO_ACTION_STATIONS;
+            }
+            if (key == FMO_KEY_PAGE_DOWN && c->stations.has_next) {
+                c->stations.start += FMO_STATION_PAGE_SIZE;
+                return FMO_ACTION_STATIONS;
+            }
+            return FMO_ACTION_NONE;
+        }
         if (key == FMO_KEY_OK) {
             if (c->stations.status == FMO_STATIONS_LOAD_FAILED ||
                 c->stations.status == FMO_STATIONS_EMPTY) return FMO_ACTION_STATIONS;
@@ -105,9 +117,6 @@ fmo_action_t fmo_controls_key(fmo_controls_t *c, fmo_key_t key)
         c->volume = c->volume <= 10 ? 0 : c->volume - 10;
         return FMO_ACTION_VOLUME;
     case FMO_KEY_OK:
-        c->audio_enabled = !c->audio_enabled;
-        return FMO_ACTION_AUDIO;
-    case FMO_KEY_STATIONS:
         c->view = FMO_VIEW_STATIONS;
         if (c->stations.request == FMO_STATION_NONE) {
             c->selection = 0;
@@ -118,6 +127,8 @@ fmo_action_t fmo_controls_key(fmo_controls_t *c, fmo_key_t key)
             if (c->stations.rows[i].uid == c->stations.target_uid) c->selection = i;
         break;
     case FMO_KEY_BACK: c->view = FMO_VIEW_NETWORK; c->selection = 0; break;
+    case FMO_KEY_PAGE_UP:
+    case FMO_KEY_PAGE_DOWN: break;
     }
     return FMO_ACTION_NONE;
 }

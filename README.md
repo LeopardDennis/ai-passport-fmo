@@ -32,12 +32,14 @@ A gray line above the yellow audio bar and outside the QSO panel shows the
 current or last-heard speaker's short place name, bearing, and distance, in
 that order. Common Chinese administrative names are shortened for display,
 for example Inner Mongolia without its autonomous-region suffix, or Foshan
-without its city suffix.
+without its city suffix. Place names include city plus district/county when
+available, with the city first. The cache format is versioned so older
+single-region labels are refreshed.
 The original geocoder/cache value is retained. The 216 px row reserves room for
 the complete bearing and distance; only the place name ends in dots if needed.
 Missing or pending place names show `--`. The place belongs to the live/last
 speaker, independently of the two history records. The callsign keeps its
-existing large/small font fitting behavior.
+fixed 32 px size and scrolls if needed.
 
 The origin is the coordinate configured on the connected FMO, read through
 `config/getCordinate` on `/ws` after the channel is confirmed, then at most once
@@ -81,18 +83,28 @@ Location data © [OpenStreetMap contributors](https://www.openstreetmap.org/copy
 attribution is also shown on the setup web page.
 
 The worker polls the latest speaker every 200 ms and never blocks UI, event
-processing, or audio tasks. Requests are separated by at least 15 seconds;
-failures impose a 60-second global backoff and a five-minute negative cache.
+processing, or audio tasks. Requests start at least three seconds apart, with
+only one request in flight; a slow completed request adds no further fixed wait.
+Transient failures use a 30-second negative cache per coordinate and a global
+5/10/20/40/60-second exponential backoff. HTTP 429/503 waits at least 60 seconds;
+a successful lookup resets the backoff. Cache hits bypass these waits. Logs record
+query duration and cache hits without recording coordinates or speaker identities.
 The HTTP body is capped at 4 KiB, each socket wait at three seconds, and the
-read loop has an eight-second deadline (a blocking socket operation may finish
-after the deadline). A short transmission can finish before lookup returns;
+body-read loop has an eight-second deadline starting after connection and headers
+(a blocking socket operation may finish after the deadline). Rate-limited logs
+identify clock/heap waits and query failures without logging callsigns or coordinates. A short transmission can finish before lookup returns;
 the result still updates the last contact if its channel, callsign and position
 match. Stale results are cached without overwriting a newer speaker.
 
 Up to 32 successful places persist in ordinary application NVS, bounded to
 roughly 4 KiB of NVS entries plus namespace/page overhead; the RAM cache is about
-2.2 KiB. The worker has a 6 KiB stack, with additional transient HTTP/TLS heap.
-Entries are evicted in bounded rotation and have no time-based expiry. Reboot
+2.2 KiB. The worker has a 6 KiB stack, with additional transient HTTP/TLS heap. Default builds use on-demand TLS record buffers,
+1 KiB outgoing records and the standard 16 KiB incoming limit. The worker requires
+56 KiB free internal heap and a 32 KiB contiguous block before querying; custom
+builds without dynamic buffers or with larger outgoing records retain the 64 KiB
+free-heap gate. The 4 KiB response buffer is allocated after the handshake peak.
+Empty cache slots are filled before evicting entries in bounded rotation, including
+a partially populated cache restored after reboot. Successful entries have no time-based expiry. Reboot
 retains them; firmware installation cleanup removes them. Only successful new
 queries write flash. Storage errors retain the RAM result. Physical TLS/audio
 coexistence and lookup latency remain device checks.
@@ -142,7 +154,7 @@ restarts synchronization without allocating another service. An already synced
 clock continues during a network interruption, and wake-up redraws the current
 minute. Time synchronization requires access to the NTP server. Separate transmit/receive frequencies are not displayed.
 
-Conversation audio connects automatically once Wi-Fi is ready, at 50% volume
+Conversation audio connects automatically once Wi-Fi is ready, at 80% volume
 by default. Its connection and activity watchdog are independent of the channel
 and event sockets: recovering metadata does not mute or discard healthy audio. The `/audio` interface supplies 8 kHz,
 16-bit signed little-endian mono PCM; the existing ES8311/I2S driver plays it
@@ -167,7 +179,7 @@ logs report connection changes and aggregate received bytes, discarded samples
 and invalid messages, committed/pending samples, output/source samples and
 maximum codec-write duration and buffer-wait time every 30 seconds, without conversation content.
 Audio continues while the LCD sleeps. No microphone capture, recording or
-transmit/PTT commands are added. The connection row shows status on the left and a right-aligned audio percentage on the right, aligned with the channel panel edge. It displays the selected volume while audio is enabled and 0% while muted. The single-line footer uses a 14 px font to explicitly name long confirm for station switching and long UP for network settings. The network menu, Wi-Fi list and station list share a footer describing UP/DOWN selection and long-confirm return. All page footers use the same 14 px font, one centered line and consistent Chinese names for the confirm key; empty Wi-Fi lists and station loading/retry states show applicable actions. Clicking OK still toggles sound.
+transmit/PTT commands are added. The connection row shows status on the left and a right-aligned audio percentage on the right, aligned with the channel panel edge. It displays the selected volume while audio is enabled and 0% while muted. The single-line footer uses a 14 px font to describe short confirm for the station list and long confirm for Wi-Fi setup. The network menu and Wi-Fi list show UP/DOWN selection and long-confirm return; the station footer shows long-UP/DOWN paging and long-confirm return. All page footers use the same 14 px font, one centered line and consistent Chinese names for the confirm key; empty Wi-Fi lists and station loading/retry states show applicable actions. Callsigns stay at 32 px; long callsigns scroll without shrinking. Set volume to 0% to silence playback.
 With no active speech, the middle shows the last-heard callsign in bold white;
 before the first contact it shows `--` and a waiting-for-speech hint.
 Runtime sound settings reset on reboot; `CONFIG_FMO_VOLUME` sets initial volume.
@@ -238,7 +250,7 @@ event handlers and releases Wi-Fi resources, and recovery clears the error.
 Installation cleanup failures continue retrying without enabling networking;
 identity and Recovery remain protected.
 
-On the main screen, long-press **UP** to open the network menu. Use UP/DOWN to select **Wi-Fi setup**,
+On the main screen, long-press **OK** to open the network menu. Use UP/DOWN to select **Wi-Fi setup**,
 **Select Wi-Fi**, or **Return**, then click OK. Long OK returns. Setup
 restarts into the network menu; click OK on Wi-Fi setup to open the QR screen.
 It remains available when the old router is offline.
@@ -303,19 +315,28 @@ and cannot reliably identify a reinstall of the same binary.
 
 - **UP**: increase conversation volume by 10%, up to 100%.
 - **DOWN**: decrease conversation volume by 10%, down to 0%.
-- **OK**: toggle audio on/off while preserving the selected volume.
-- **Main-screen long OK**: open the station list; long OK returns from subpages.
-- **Main-screen long UP**: open the network menu for Wi-Fi setup; UP/DOWN selects, click OK executes, long OK returns. Holding UP for five seconds at boot still enters Recovery.
+- **Main-screen OK**: open the station list.
+- **Main-screen long OK**: open the network menu for Wi-Fi setup; UP/DOWN selects, click OK executes, long OK returns from subpages.
+- **Main-screen long UP**: no shortcut. Holding UP for five seconds at boot still enters Recovery.
 - **Setup click OK**: switch QR/credentials; UP/DOWN or long OK cancels to the network menu.
 
 The station list uses the existing font, palette and single-line gray footer.
-UP/DOWN selects among six rows and loads the adjacent page at the boundary;
+UP/DOWN selects among six rows and loads the adjacent page at the boundary.
+Long UP/DOWN moves one page while preserving the selected row, clamped on
+a short last page. Paging stops at either end and waits for pending requests;
 the current station appears in the summary and has a right-side check mark in the list, matching the saved Wi-Fi list.
-The range indicator includes `+` when another page is available. Selected long
+The upper-right indicator shows the selected station index/total, for example
+`1/162`, `2/162`, or `3/162`, and follows selection across pages. It shows
+`1/--` when the total is unavailable. Opening or returning to the first page
+refreshes the total with one-row range probes; other pages reuse it. Counting
+is limited to 32 probes and stops starting probes after three seconds, then
+loads the ordinary page. The existing ten-second response timeout still applies.
+Loading remains cancellable with long OK and playback continues. Selected long
 names scroll; matching names on a page include their UIDs. Click OK to switch
 immediately, without a confirmation page. Selecting the current station only
 returns to monitoring with a hint. Long OK returns without cancelling a sent
-command. Browsing preserves playback and background channel polling.
+command. Browsing preserves playback; counting and page requests share the
+control connection serially, then channel polling resumes.
 
 A switch waits for the audio worker to mute and close its old stream, clears old
 speech/grid/history, and restarts reception after the actual UID is confirmed.

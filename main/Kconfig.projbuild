@@ -34,10 +34,11 @@ config FMO_BACKLIGHT
 config FMO_VOLUME
     int "Initial conversation volume percent"
     range 0 100
-    default 50
+    default 80
     help
         Auto-play received FMO PCM audio after connection. UP/DOWN changes volume
-        by 10 percent; short OK toggles audio. Long OK opens stations; long UP opens network settings.
+        by 10 percent; short OK opens stations. Long OK opens network settings
+        for Wi-Fi setup. Long UP has no main-screen shortcut.
         Volume 0 silences audio. These runtime settings reset on reboot.
 
 config FMO_GEOCODER_URL
@@ -45,7 +46,7 @@ config FMO_GEOCODER_URL
     default "https://photon.komoot.io/reverse"
     help
         Sends only WGS84 coordinates, never callsigns or credentials. Uses a
-        bounded persistent cache and at most one request every 15 seconds.
+        bounded persistent cache and at most one request every 3 seconds.
         The public demo has no availability guarantee. For a large deployment,
         configure your own Photon endpoint. OpenStreetMap attribution applies.
 

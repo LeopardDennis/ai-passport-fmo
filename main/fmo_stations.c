@@ -5,6 +5,7 @@ bool fmo_stations_load(fmo_stations_t *s, uint32_t start, uint64_t now)
 {
     if (s->request != FMO_STATION_NONE || start > UINT32_MAX - FMO_STATION_PAGE_SIZE - 1)
         return false;
+    s->counting = false;
     s->start = start;
     s->count = 0;
     s->has_next = false;
@@ -12,6 +13,48 @@ bool fmo_stations_load(fmo_stations_t *s, uint32_t start, uint64_t now)
     s->request = FMO_STATION_LIST_QUEUED;
     s->started_ms = now;
     return true;
+}
+
+void fmo_stations_begin_count(fmo_stations_t *s, uint64_t now)
+{
+    if (s->request != FMO_STATION_LIST_QUEUED || (s->start && s->total_known)) return;
+    s->total_known = false;
+    s->counting = true;
+    s->count_low = 0;
+    s->count_high = UINT32_MAX;
+    s->count_probe = 64;
+    s->count_queries = 0;
+    s->count_started_ms = now;
+}
+
+void fmo_stations_prepare_query(fmo_stations_t *s, uint64_t now)
+{
+    if (!s->counting) return;
+    if (s->count_queries >= 32 || now - s->count_started_ms >= FMO_STATION_COUNT_BUDGET_MS)
+        s->counting = false; /* Fall back to the normal page, never invent a total. */
+    else ++s->count_queries;
+}
+
+static void count_reply(fmo_stations_t *s, const fmo_station_t *rows, unsigned count)
+{
+    s->request = FMO_STATION_LIST_QUEUED;
+    if (!rows || count > 1) {
+        s->counting = false;
+        return;
+    }
+    if (count) s->count_low = s->count_probe + 1;
+    else s->count_high = s->count_probe;
+    if (s->count_high != UINT32_MAX) {
+        if (s->count_low == s->count_high) {
+            s->total = s->count_low;
+            s->total_known = true;
+            s->counting = false;
+        } else s->count_probe = s->count_low + (s->count_high - s->count_low) / 2;
+    } else if (s->count_probe >= FMO_STATION_COUNT_LIMIT) s->counting = false;
+    else {
+        s->count_probe = s->count_probe * 2 + 1;
+        if (s->count_probe > FMO_STATION_COUNT_LIMIT) s->count_probe = FMO_STATION_COUNT_LIMIT;
+    }
 }
 
 bool fmo_stations_switch(fmo_stations_t *s, uint32_t uid, uint32_t current, uint64_t now)
@@ -32,10 +75,18 @@ bool fmo_stations_switch(fmo_stations_t *s, uint32_t uid, uint32_t current, uint
 void fmo_stations_list(fmo_stations_t *s, const fmo_station_t *rows, unsigned count)
 {
     if (s->request != FMO_STATION_LIST_WAIT) return;
+    if (s->counting) { count_reply(s, rows, count); return; }
     s->request = FMO_STATION_NONE;
     if (!rows || count > FMO_STATION_PAGE_SIZE + 1) {
         s->status = FMO_STATIONS_LOAD_FAILED;
         return;
+    }
+    if (s->total_known && (s->start + count > s->total ||
+        (count < FMO_STATION_PAGE_SIZE + 1 && s->start + count != s->total)))
+        s->total_known = false; /* The remote list may change between queries. */
+    if (count <= FMO_STATION_PAGE_SIZE && (count || !s->start)) {
+        s->total = s->start + count;
+        s->total_known = true;
     }
     s->has_next = count > FMO_STATION_PAGE_SIZE;
     s->count = s->has_next ? FMO_STATION_PAGE_SIZE : count;
@@ -61,6 +112,8 @@ void fmo_stations_current(fmo_stations_t *s, uint32_t uid)
 
 void fmo_stations_disconnect(fmo_stations_t *s)
 {
+    s->counting = false;
+    s->total_known = false;
     if (s->request == FMO_STATION_LIST_QUEUED || s->request == FMO_STATION_LIST_WAIT) {
         s->status = FMO_STATIONS_LOAD_FAILED;
         s->request = FMO_STATION_NONE;

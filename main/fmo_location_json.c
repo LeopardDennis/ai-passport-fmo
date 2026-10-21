@@ -3,6 +3,27 @@
 #include "cJSON.h"
 #include <string.h>
 
+static const char *place_field(const cJSON *props, const char *key)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(props, key);
+    char checked[FMO_LOCATION_MAX + 1];
+    if (!cJSON_IsString(value) || !value->valuestring[0] ||
+        !fmo_text_copy_utf8(checked, sizeof(checked), value->valuestring) ||
+        !strcmp(value->valuestring, "市辖区") || !strcmp(value->valuestring, "市辖县")) return NULL;
+    return value->valuestring;
+}
+
+static bool suffix(const char *name, const char *ending)
+{
+    size_t n = name ? strlen(name) : 0, e = strlen(ending);
+    return n >= e && !strcmp(name + n - e, ending);
+}
+
+static const char *different(const char *name, const char *city)
+{
+    return name && (!city || strcmp(name, city)) ? name : NULL;
+}
+
 bool fmo_location_parse_response(const char *json, char *name, size_t capacity)
 {
     if (!name || !capacity) return false;
@@ -24,16 +45,34 @@ bool fmo_location_parse_response(const char *json, char *name, size_t capacity)
     const cJSON *features = cJSON_GetObjectItemCaseSensitive(root, "features");
     const cJSON *feature = cJSON_IsArray(features) ? cJSON_GetArrayItem(features, 0) : NULL;
     const cJSON *props = cJSON_GetObjectItemCaseSensitive(feature, "properties");
-    const cJSON *state = cJSON_GetObjectItemCaseSensitive(props, "state");
-    /* Chinese municipalities often expose a district in Photon's city field. */
-    if (cJSON_IsString(state) &&
-        (!strcmp(state->valuestring, "北京市") || !strcmp(state->valuestring, "上海市") ||
-         !strcmp(state->valuestring, "天津市") || !strcmp(state->valuestring, "重庆市")))
-        fmo_text_copy_utf8(name, capacity, state->valuestring);
-    const char *fields[] = {"city", "county", "district", "state", "country"};
-    for (unsigned i = 0; !name[0] && i < sizeof(fields) / sizeof(fields[0]); ++i) {
-        const cJSON *value = cJSON_GetObjectItemCaseSensitive(props, fields[i]);
-        if (cJSON_IsString(value)) fmo_text_copy_utf8(name, capacity, value->valuestring);
+    const char *state = place_field(props, "state");
+    const char *city = place_field(props, "city");
+    const char *county = place_field(props, "county");
+    const char *district = place_field(props, "district");
+    const char *area = NULL;
+    /* Photon may put a municipality's district in city, or a prefecture
+     * in county. Keep the city first instead of showing only its district. */
+    if (state && (!strcmp(state, "北京市") || !strcmp(state, "上海市") ||
+                  !strcmp(state, "天津市") || !strcmp(state, "重庆市"))) {
+        area = different(county, state);
+        if (!area) area = different(city, state);
+        city = state;
+    } else if (county && (suffix(county, "市") || suffix(county, "州") || suffix(county, "盟")) &&
+               (!city || suffix(city, "区") || suffix(city, "县") || suffix(city, "旗"))) {
+        area = city;
+        city = county;
+    } else area = different(county, city);
+    if (!area) area = different(district, city);
+    if (!city) { city = county ? county : district ? district : state; area = NULL; }
+    if (!city) city = place_field(props, "country");
+    if (city) fmo_text_copy_utf8(name, capacity, city);
+    if (name[0] && area && strcmp(area, city)) {
+        size_t used = strlen(name);
+        if (used + 2 < capacity) {
+            name[used] = ' ';
+            fmo_text_copy_utf8(name + used + 1, capacity - used - 1, area);
+            if (!name[used + 1]) name[used] = 0;
+        }
     }
     /* Do not mistake a nearby POI's name for an administrative place. */
     cJSON_Delete(root);

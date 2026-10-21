@@ -75,12 +75,21 @@ unsigned fmo_location_store(fmo_location_cache_t *cache, fmo_position_t p,
                             const char *name, uint64_t now)
 {
     unsigned slot = cache->next;
+    bool existing = false;
     for (unsigned i = 0; i < FMO_LOCATION_CACHE_SIZE; ++i)
-        if (cache->occupied[i] && equal(cache->entries[i].position, p)) { slot = i; break; }
+        if (cache->occupied[i] && equal(cache->entries[i].position, p)) {
+            slot = i; existing = true; break;
+        }
+    /* A reboot may restore a sparse cache. Fill holes before evicting a
+     * persisted place; a failed new lookup must not discard that cache hit. */
+    if (!existing) for (unsigned i = 0; i < FMO_LOCATION_CACHE_SIZE; ++i) {
+        unsigned candidate = (cache->next + i) % FMO_LOCATION_CACHE_SIZE;
+        if (!cache->occupied[candidate]) { slot = candidate; break; }
+    }
     memset(&cache->entries[slot], 0, sizeof(cache->entries[slot]));
     cache->entries[slot].position = p;
     fmo_text_copy_utf8(cache->entries[slot].name, sizeof(cache->entries[slot].name), name);
-    cache->retry_at[slot] = now + 300000;
+    cache->retry_at[slot] = now + FMO_LOCATION_RETRY_MS;
     cache->occupied[slot] = true;
     cache->next = (slot + 1) % FMO_LOCATION_CACHE_SIZE;
     return slot;
@@ -115,8 +124,20 @@ void fmo_location_short_name(const char *name, char *out, size_t capacity)
             break;
         }
     }
-    size_t length = strlen(compact);
-    if (length > 3 && (!strcmp(compact + length - 3, "市") ||
-                       !strcmp(compact + length - 3, "省"))) compact[length - 3] = 0;
+    bool combined = strchr(compact, ' ') != NULL;
+    char *part = compact;
+    while (*part) {
+        char *end = strchr(part, ' ');
+        size_t length = end ? (size_t)(end - part) : strlen(part);
+        if (length > 3 && (!strncmp(part + length - 3, "市", 3) ||
+                           !strncmp(part + length - 3, "省", 3) ||
+                           (combined && (!strncmp(part + length - 3, "区", 3) ||
+                                         !strncmp(part + length - 3, "县", 3))))) {
+            memmove(part + length - 3, part + length, strlen(part + length) + 1);
+            if (end) end -= 3;
+        }
+        if (!end) break;
+        part = end + 1;
+    }
     fmo_text_copy_utf8(out, capacity, compact);
 }

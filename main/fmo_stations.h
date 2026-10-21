@@ -4,6 +4,8 @@
 
 #define FMO_STATION_PAGE_SIZE 6
 #define FMO_STATION_TIMEOUT_MS 10000
+#define FMO_STATION_COUNT_BUDGET_MS 3000
+#define FMO_STATION_COUNT_LIMIT 65535
 
 typedef struct { uint32_t uid; char name[48]; } fmo_station_t;
 typedef enum {
@@ -21,12 +23,19 @@ typedef struct {
     uint32_t start, target_uid;
     unsigned count;
     bool has_next, audio_paused;
+    bool total_known, counting;
+    uint32_t total, count_low, count_high, count_probe;
+    unsigned count_queries;
+    uint64_t count_started_ms;
     fmo_station_status_t status;
     fmo_station_request_t request;
     uint64_t started_ms;
 } fmo_stations_t;
 
 bool fmo_stations_load(fmo_stations_t *s, uint32_t start, uint64_t now);
+/* Count with bounded one-row range probes before loading the requested page. */
+void fmo_stations_begin_count(fmo_stations_t *s, uint64_t now);
+void fmo_stations_prepare_query(fmo_stations_t *s, uint64_t now);
 bool fmo_stations_switch(fmo_stations_t *s, uint32_t uid, uint32_t current, uint64_t now);
 void fmo_stations_list(fmo_stations_t *s, const fmo_station_t *rows, unsigned count);
 void fmo_stations_ack(fmo_stations_t *s, bool success);

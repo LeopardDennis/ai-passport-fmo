@@ -39,7 +39,6 @@
 #define FOOTER_TOP 294
 LV_FONT_DECLARE(fmo_channel_font);
 LV_FONT_DECLARE(fmo_callsign_bold_14);
-LV_FONT_DECLARE(fmo_callsign_bold_20);
 LV_FONT_DECLARE(fmo_callsign_bold_32);
 
 static lv_obj_t *audio_label, *link_label, *battery_label, *channel_label, *clock_label;
@@ -233,9 +232,9 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
             lv_draw_buf_create(128, 128, LV_COLOR_FORMAT_I1, LV_STRIDE_AUTO) : NULL;
         overlay = rect(lv_screen_active(), 0, 40, 240, 280, BLACK);
         if (view == FMO_VIEW_STATIONS) {
-            lv_obj_t *title = label(overlay, 12, 10, 140, &fmo_channel_font, ORANGE, "台站列表");
+            lv_obj_t *title = label(overlay, 12, 10, 80, &fmo_channel_font, ORANGE, "台站列表");
             center_ink(title, 10, 20, 'H');
-            station_page = label(overlay, 160, 10, 68, &lv_font_montserrat_14, MUTED, "");
+            station_page = label(overlay, 96, 10, 132, &lv_font_montserrat_14, MUTED, "");
             lv_obj_set_style_text_align(station_page, LV_TEXT_ALIGN_RIGHT, 0);
             center_ink(station_page, 10, 20, 'H');
             station_status = label(overlay, 12, 38, 216, &fmo_channel_font, MUTED, "");
@@ -377,9 +376,18 @@ static void render_stations(const fmo_controls_t *controls, const fmo_monitor_st
 {
     const fmo_stations_t *s = &controls->stations;
     char buffer[80];
-    if (s->count) snprintf(buffer, sizeof(buffer), "%lu-%lu%s",
-        (unsigned long)s->start + 1, (unsigned long)s->start + s->count, s->has_next ? "+" : "");
+    unsigned selected = controls->selection < s->count ? controls->selection : 0;
+    if (s->count && s->total_known) snprintf(buffer, sizeof(buffer), "%lu/%lu",
+        (unsigned long)s->start + selected + 1, (unsigned long)s->total);
+    else if (s->count) snprintf(buffer, sizeof(buffer), "%lu/--",
+        (unsigned long)s->start + selected + 1);
+    else if (s->status == FMO_STATIONS_EMPTY && s->total_known) snprintf(buffer, sizeof(buffer), "0/%lu", (unsigned long)s->total);
     else buffer[0] = '\0';
+    lv_point_t page_size;
+    lv_text_get_size(&page_size, buffer, &lv_font_montserrat_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int letter_space = page_size.x > 132 ? -1 : 0;
+    if (lv_obj_get_style_text_letter_space(station_page, 0) != letter_space)
+        lv_obj_set_style_text_letter_space(station_page, letter_space, 0);
     if (text(station_page, buffer)) center_ink(station_page, 10, 20, 'H');
     const char *status = NULL;
     switch (s->status) {
@@ -441,7 +449,7 @@ static void render_stations(const fmo_controls_t *controls, const fmo_monitor_st
     else if (s->status == FMO_STATIONS_LOAD_FAILED || s->status == FMO_STATIONS_EMPTY)
         footer = "确认: 重试 长按确认: 返回";
     else if (s->count)
-        footer = "上/下: 选择 长按确认: 返回";
+        footer = "长按上下翻页 长按确认返回";
     else footer = "长按确认: 返回";
     if (text(station_footer, footer)) center_ink(station_footer, FOOTER_TOP - 40, 18, 'H');
 }
@@ -679,7 +687,7 @@ static void create_monitor(void)
     fmo_audio_meter_reset(&audio_meter);
     audio_meter_enabled = false;
     hint_label = label(screen, 12, FOOTER_TOP, 216, fmo_wifi_font(), MUTED,
-                       "长按确认: 切换台站 长按上: 网络");
+                       "确认: 台站列表 长按确认: 配网");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, 0);
     center_ink(hint_label, FOOTER_TOP, 18, 'H');
 }
@@ -754,9 +762,8 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     bool call_changed = text(callsign_label, call);
     color(callsign_label, speaking ? (s->speaker_cross_server ? CROSS_SERVER_COLOR : ORANGE) : WHITE);
     /* Use real bold glyphs for callsigns; keep setup passwords in regular text.
-     * Measure the selected weight before fitting long suffixes at 20px. */
+     * Callsigns always use 32px; long values scroll within the grid boundary. */
     const lv_font_t *large = setup ? &lv_font_montserrat_32 : &fmo_callsign_bold_32;
-    const lv_font_t *small = setup ? &lv_font_montserrat_20 : &fmo_callsign_bold_20;
     /* A release retains the last speaker's grid; the next start replaces it,
      * including clearing it when that talker supplies no grid. */
     const char *grid = live && s->last_speaker[0] ? s->grid : "";
@@ -790,7 +797,7 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         if (grid_size.x > 80) grid_size.x = 80;
         int call_space = 216 - (grid[0] ? grid_size.x + 8 : 0);
         lv_text_get_size(&size, call, large, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        const lv_font_t *font = size.x > call_space ? small : large;
+        const lv_font_t *font = setup && size.x > call_space ? &lv_font_montserrat_20 : large;
         if (lv_obj_get_style_text_font(callsign_label, 0) != font)
             lv_obj_set_style_text_font(callsign_label, font, 0);
         if (font != large)
@@ -828,6 +835,6 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         }
         color(qso_labels[i], present ? WHITE : MUTED);
     }
-    if (text(hint_label, "长按确认: 切换台站 长按上: 网络"))
+    if (text(hint_label, "确认: 台站列表 长按确认: 配网"))
         center_ink(hint_label, FOOTER_TOP, 18, 'H');
 }

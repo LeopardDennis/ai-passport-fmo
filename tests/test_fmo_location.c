@@ -61,6 +61,12 @@ int main(void)
     assert(!strcmp(tiny,"内"));
     fmo_location_short_name(NULL,tiny,sizeof(tiny));
     assert(!tiny[0]);
+    fmo_location_cache_t sparse={0};
+    sparse.entries[0]=(fmo_location_entry_t){.position=p,.name="上海市"};
+    sparse.occupied[0]=true;
+    fmo_position_t fresh={123,456};
+    assert(fmo_location_store(&sparse,fresh,"",100)==1);
+    assert(!strcmp(fmo_location_find(&sparse,p,100)->name,"上海市"));
     fmo_location_cache_t cache={0};
     assert(!fmo_location_find(&cache,p,0));
     fmo_location_store(&cache,p,"上海市",0);
@@ -68,8 +74,8 @@ int main(void)
     assert(fmo_location_entry_valid(fmo_location_find(&cache,p,0)));
     fmo_position_t failure={123,456};
     fmo_location_store(&cache,failure,"",100);
-    assert(fmo_location_find(&cache,failure,300099));
-    assert(!fmo_location_find(&cache,failure,300100));
+    assert(fmo_location_find(&cache,failure,30099));
+    assert(!fmo_location_find(&cache,failure,30100));
     for (unsigned i=0;i<FMO_LOCATION_CACHE_SIZE;++i)
         fmo_location_store(&cache,(fmo_position_t){(int)i,0},"佛山市",500);
     assert(!fmo_location_find(&cache,p,0));
@@ -81,9 +87,26 @@ int main(void)
 
     char name[49];
     assert(fmo_location_parse_response("{\"features\":[{\"properties\":{\"city\":\"黄浦区\",\"state\":\"上海市\"}}]}",name,sizeof(name)));
-    assert(!strcmp(name,"上海市"));
+    assert(!strcmp(name,"上海市 黄浦区"));
     assert(fmo_location_parse_response("{\"features\":[{\"properties\":{\"city\":\"佛山市\",\"state\":\"广东省\"}}]}",name,sizeof(name)));
     assert(!strcmp(name,"佛山市"));
+    const char *places[][2] = {
+        {"{\"city\":\"佛山市\",\"county\":\"南海区\",\"district\":\"桂城街道\"}", "佛山市 南海区"},
+        {"{\"city\":\"南海区\",\"county\":\"佛山市\"}", "佛山市 南海区"},
+        {"{\"city\":\"上海市\",\"county\":\"上海市\",\"district\":\"黄浦区\",\"state\":\"上海市\"}", "上海市 黄浦区"},
+        {"{\"city\":\"市辖区\",\"district\":\"黄浦区\",\"state\":\"上海市\"}", "上海市 黄浦区"},
+        {"{\"city\":\"佛山市\",\"county\":\"佛山市\"}", "佛山市"},
+        {"{\"county\":\"南海区\"}", "南海区"},
+        {"{\"state\":\"内蒙古自治区\"}", "内蒙古自治区"},
+    };
+    for (unsigned i=0;i<sizeof(places)/sizeof(places[0]);++i) {
+        char json[512];snprintf(json,sizeof(json),"{\"features\":[{\"properties\":%s}]}",places[i][0]);
+        assert(fmo_location_parse_response(json,name,sizeof(name)) && !strcmp(name,places[i][1]));
+    }
+    fmo_location_short_name("佛山市 南海区",name,sizeof(name));assert(!strcmp(name,"佛山 南海"));
+    fmo_location_short_name("上海市 黄浦区",name,sizeof(name));assert(!strcmp(name,"上海 黄浦"));
+    fmo_location_short_name("New York Kings County",name,sizeof(name));assert(!strcmp(name,"New York Kings County"));
+
     assert(!fmo_location_parse_response("{\"features\":[{\"properties\":{\"name\":\"商场\"}}]}",name,sizeof(name)));
     const char *bad_json[]={"{}","[]","null","{","{\"features\":[]}","{}trailing","{\"features\":[{\"properties\":{\"city\":\"A\\u0000B\"}}]}"};
     for(unsigned i=0;i<sizeof(bad_json)/sizeof(bad_json[0]);++i) assert(!fmo_location_parse_response(bad_json[i],name,sizeof(name)));

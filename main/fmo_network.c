@@ -544,9 +544,11 @@ static bool request_station_control(void)
         return false;
     }
     if (phase == FMO_STATION_LIST_QUEUED) {
+        fmo_stations_prepare_query(stations, now_ms());
         length = snprintf(request, sizeof(request),
-            "{\"type\":\"station\",\"subType\":\"getListRange\",\"data\":{\"start\":%lu,\"count\":7}}",
-            (unsigned long)stations->start);
+            "{\"type\":\"station\",\"subType\":\"getListRange\",\"data\":{\"start\":%lu,\"count\":%u}}",
+            (unsigned long)(stations->counting ? stations->count_probe : stations->start),
+            stations->counting ? 1 : FMO_STATION_PAGE_SIZE + 1);
         stations->request = FMO_STATION_LIST_WAIT;
     } else if (phase == FMO_STATION_SWITCH_QUEUED && s_station_prepared && fmo_audio_is_suspended()) {
         length = snprintf(request, sizeof(request),
@@ -1132,6 +1134,7 @@ bool fmo_network_request_stations(uint32_t start)
     if (!s_network_task || !s_state_lock || xSemaphoreTake(s_state_lock, 0) != pdTRUE) return false;
     bool accepted = s_snapshot.state.wifi_connected && s_snapshot.state.control_connected &&
                     fmo_stations_load(&s_snapshot.stations, start, now_ms());
+    if (accepted) fmo_stations_begin_count(&s_snapshot.stations, now_ms());
     if (!accepted && s_snapshot.stations.request == FMO_STATION_NONE) {
         s_snapshot.stations.status = FMO_STATIONS_LOAD_FAILED;
         s_snapshot.stations.start = start;

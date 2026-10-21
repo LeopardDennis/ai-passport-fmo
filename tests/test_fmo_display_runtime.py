@@ -111,6 +111,8 @@ int main(void) {
     assert(!strcmp(trace,"wridfb") && brightness==80 && notices==1);
     key(BSP_BTN_UP, BSP_BTN_LONG); assert(!setups && !requests);
     key(BSP_BTN_UP, BSP_BTN_PRESS); key(BSP_BTN_UP, BSP_BTN_LONG);
+    assert(!setups && s_controls.view==FMO_VIEW_MONITOR);
+    key(BSP_BTN_OK, BSP_BTN_LONG);
     assert(!setups && s_controls.view==FMO_VIEW_NETWORK);
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(setups==1);
     fmo_controls_observe_setup(&s_controls, true);
@@ -159,16 +161,28 @@ int main(void) {
     next_snapshot.state=s_state; next_snapshot.speech_activity=1;
     s_fmo_queue=1; s_input_queue=2; has_snapshot=true;
     ui_tick(NULL); assert(!panel_dark && !s_state.speaking && s_speech_activity==1);
-    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(!s_controls.audio_enabled && audio_volume==0);
-    key(BSP_BTN_UP, BSP_BTN_CLICK); assert(s_controls.volume==70 && audio_volume==0);
-    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.audio_enabled && audio_volume==70);
-    key(BSP_BTN_OK, BSP_BTN_LONG); assert(requests==1);
+    key(BSP_BTN_UP, BSP_BTN_CLICK); assert(s_controls.volume==70 && audio_volume==70);
+    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(requests==1 && s_controls.audio_enabled && audio_volume==70);
     assert(s_controls.view==FMO_VIEW_STATIONS && s_controls.stations.status==FMO_STATIONS_LOADING);
     key(BSP_BTN_UP, BSP_BTN_LONG); assert(s_controls.view==FMO_VIEW_STATIONS && requests==1);
     key(BSP_BTN_OK, BSP_BTN_LONG); assert(s_controls.view==FMO_VIEW_MONITOR);
-    key(BSP_BTN_OK, BSP_BTN_LONG); assert(s_controls.view==FMO_VIEW_STATIONS && requests==1);
+    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.view==FMO_VIEW_STATIONS && requests==1);
     assert(update_display(clock_ms+600000)); // Browsing keeps the display awake.
     next_snapshot.state=s_state; next_snapshot.stations.status=FMO_STATIONS_READY;
+    next_snapshot.stations.count=6; next_snapshot.stations.has_next=true;
+    has_snapshot=true;ui_tick(NULL);
+    s_controls.selection=4;
+    key(BSP_BTN_DOWN,BSP_BTN_LONG);
+    assert(requests==2 && s_controls.stations.start==6 && s_controls.selection==4);
+    key(BSP_BTN_DOWN,BSP_BTN_LONG); assert(requests==2); // Loading is locked.
+    next_snapshot.stations.start=6; next_snapshot.stations.count=2;
+    next_snapshot.stations.has_next=false;
+    has_snapshot=true;ui_tick(NULL);
+    assert(s_controls.selection==1); // Short final page clamps selection.
+    key(BSP_BTN_DOWN,BSP_BTN_LONG);assert(requests==2);
+    key(BSP_BTN_UP,BSP_BTN_LONG);
+    assert(requests==3 && s_controls.stations.start==0 && s_controls.selection==1);
+    next_snapshot.stations.start=0;
     next_snapshot.stations.count=1; next_snapshot.stations.rows[0].uid=43;
     has_snapshot=true;ui_tick(NULL);
     key(BSP_BTN_OK,BSP_BTN_CLICK);

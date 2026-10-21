@@ -15,6 +15,17 @@
 #include <time.h>
 
 #define RESPONSE_LIMIT 4096
+#define QUERY_INTERVAL_MS 3000
+#define FAILURE_BACKOFF_MIN_MS 5000
+#define FAILURE_BACKOFF_MAX_MS 60000
+/* The lower budget requires on-demand TLS records and a small TX record.
+ * Keep the original guard for custom builds with fixed/larger TLS buffers. */
+#if CONFIG_MBEDTLS_DYNAMIC_BUFFER && CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN <= 1024
+#define LOOKUP_MIN_FREE_HEAP (56 * 1024)
+#else
+#define LOOKUP_MIN_FREE_HEAP (64 * 1024)
+#endif
+#define LOOKUP_MIN_BLOCK (32 * 1024)
 static const char *TAG = "fmo_location";
 static fmo_location_cache_t cache;
 static TaskHandle_t worker;
@@ -24,7 +35,7 @@ static uint64_t milliseconds(void) { return esp_timer_get_time() / 1000; }
 static void cache_load(void)
 {
     nvs_handle_t handle;
-    if (nvs_open("fmo_places_v1", NVS_READONLY, &handle) != ESP_OK) return;
+    if (nvs_open("fmo_places_v2", NVS_READONLY, &handle) != ESP_OK) return;
     for (unsigned i = 0; i < FMO_LOCATION_CACHE_SIZE; ++i) {
         char key[8];
         snprintf(key, sizeof(key), "p%02u", i);
@@ -40,7 +51,7 @@ static void cache_load(void)
 static void cache_save(unsigned slot)
 {
     nvs_handle_t handle;
-    if (nvs_open("fmo_places_v1", NVS_READWRITE, &handle) != ESP_OK) return;
+    if (nvs_open("fmo_places_v2", NVS_READWRITE, &handle) != ESP_OK) return;
     char key[8];
     snprintf(key, sizeof(key), "p%02u", slot);
     esp_err_t err = nvs_set_blob(handle, key, &cache.entries[slot], sizeof(cache.entries[slot]));
@@ -49,14 +60,15 @@ static void cache_save(unsigned slot)
     if (err != ESP_OK) ESP_LOGW(TAG, "Cache write failed; retaining RAM cache");
 }
 
-static bool lookup(fmo_position_t position, char *name, size_t capacity)
+static bool lookup(fmo_position_t position, char *name, size_t capacity, bool *server_busy)
 {
+    *server_busy = false;
     char url[256];
     int n = snprintf(url, sizeof(url), "%s?lat=%.6f&lon=%.6f&limit=1",
                      CONFIG_FMO_GEOCODER_URL, position.lat_e6 / 1000000.0, position.lon_e6 / 1000000.0);
     if (n < 0 || (size_t)n >= sizeof(url)) return false;
-    char *body = malloc(RESPONSE_LIMIT + 1);
-    if (!body) return false;
+    /* Allocate the body only after the certificate/handshake peak. */
+    char *body = NULL;
     esp_http_client_config_t config = {
         .url = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -68,11 +80,29 @@ static bool lookup(fmo_position_t position, char *name, size_t capacity)
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     bool ok = false;
-    uint64_t deadline = milliseconds() + 8000;
+    const char *failure = "client allocation";
     if (!client) goto done;
-    if (esp_http_client_open(client, 0) != ESP_OK) goto done;
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Lookup connection failed: %d", (int)err);
+        failure = "connection";
+        goto done;
+    }
     int64_t length = esp_http_client_fetch_headers(client);
-    if (length < 0 || length > RESPONSE_LIMIT || esp_http_client_get_status_code(client) != 200) goto done;
+    int status = esp_http_client_get_status_code(client);
+    *server_busy = status == 429 || status == 503;
+    failure = "HTTP headers/status/size";
+    if (length < 0 || length > RESPONSE_LIMIT || status != 200) {
+        ESP_LOGW(TAG, "Lookup HTTP status=%d, length=%lld", status, (long long)length);
+        goto done;
+    }
+    /* TLS negotiation must not consume the body-read budget. Socket waits
+     * remain bounded by timeout_ms, including connection and headers. */
+    failure = "response allocation";
+    body = malloc(RESPONSE_LIMIT + 1);
+    if (!body) goto done;
+    uint64_t deadline = milliseconds() + 8000;
+    failure = "incomplete/late body";
     size_t used = 0;
     /* fetch_headers may already have buffered the complete body. Always drain
      * read(), even when is_complete_data_received() is already true. */
@@ -87,7 +117,11 @@ static bool lookup(fmo_position_t position, char *name, size_t capacity)
 done:
     /* Release TLS buffers before allocating the JSON tree. */
     if (client) esp_http_client_cleanup(client);
-    if (ok) ok = fmo_location_parse_response(body, name, capacity);
+    if (ok) {
+        ok = fmo_location_parse_response(body, name, capacity);
+        failure = "no administrative place in response";
+    }
+    if (!ok) ESP_LOGW(TAG, "Lookup failed: %s", failure);
     free(body);
     return ok;
 }
@@ -96,7 +130,8 @@ static void geocoder_task(void *argument)
 {
     (void)argument;
     cache_load();
-    uint64_t next_request = 0;
+    uint64_t next_request = 0, next_diagnostic = 0;
+    unsigned failure_backoff = FAILURE_BACKOFF_MIN_MS;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(200));
         fmo_monitor_state_t request;
@@ -106,24 +141,52 @@ static void geocoder_task(void *argument)
         uint64_t now = milliseconds();
         const fmo_location_entry_t *hit = fmo_location_find(&cache, position, now);
         if (hit) {
-            if (hit->name[0]) fmo_network_location_result(&request, hit->name);
+            if (hit->name[0]) {
+                fmo_network_location_result(&request, hit->name);
+                ESP_LOGI(TAG, "Place cache hit");
+            }
             continue;
         }
         /* Wait for a valid TLS clock and protect streaming audio's heap budget.
          * Cache hits above remain available without Internet or a synced clock. */
-        if (now < next_request || time(NULL) < 1704067200 ||
-            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 65536 ||
-            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 32768) continue;
+        if (now < next_request) continue;
+        bool clock_ready = time(NULL) >= 1704067200;
+        size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!clock_ready || free_heap < LOOKUP_MIN_FREE_HEAP || largest < LOOKUP_MIN_BLOCK) {
+            if (now >= next_diagnostic) {
+                ESP_LOGW(TAG, "Lookup waiting: clock=%s heap=%u largest=%u",
+                         clock_ready ? "ready" : "unsynced", (unsigned)free_heap, (unsigned)largest);
+                next_diagnostic = now + 60000;
+            }
+            continue;
+        }
         char name[FMO_LOCATION_MAX + 1] = "";
-        bool ok = lookup(position, name, sizeof(name));
+        bool server_busy;
+        uint64_t started = now;
+        ESP_LOGI(TAG, "Place lookup started");
+        bool ok = lookup(position, name, sizeof(name), &server_busy);
         now = milliseconds();
-        next_request = now + (ok ? 15000 : 60000);
+        ESP_LOGI(TAG, "Place lookup finished: ok=%d elapsed_ms=%lu",
+                 ok, (unsigned long)(now - started));
+        if (ok) {
+            /* Rate-limit start times, not completion: a slow response must not
+             * impose another fixed wait on the newly active speaker. */
+            next_request = started + QUERY_INTERVAL_MS;
+            failure_backoff = FAILURE_BACKOFF_MIN_MS;
+        } else {
+            if (server_busy) failure_backoff = FAILURE_BACKOFF_MAX_MS;
+            next_request = now + failure_backoff;
+            failure_backoff = failure_backoff >= FAILURE_BACKOFF_MAX_MS / 2 ?
+                FAILURE_BACKOFF_MAX_MS : failure_backoff * 2;
+        }
         unsigned slot = fmo_location_store(&cache, position, ok ? name : "", now);
         if (ok) {
             /* Result is rechecked against current identity under the state lock.
              * A stale result can be cached, but cannot change the new speaker. */
             fmo_network_location_result(&request, name);
             cache_save(slot);
+            ESP_LOGI(TAG, "Place lookup succeeded");
         }
     }
 }

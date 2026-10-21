@@ -5,6 +5,7 @@
 
 #define FMO_LOCATION_MAX 48
 #define FMO_LOCATION_CACHE_SIZE 32
+#define FMO_LOCATION_RETRY_MS 30000
 
 typedef struct { int32_t lat_e6, lon_e6; } fmo_position_t;
 typedef struct {
