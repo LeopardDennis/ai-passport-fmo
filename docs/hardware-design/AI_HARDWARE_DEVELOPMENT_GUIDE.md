@@ -178,7 +178,8 @@ Initialization reads VERSION and checks the profile update flag plus all 80 prof
 - SOC uses registers `0x04–0x05`; values above 100 are treated as not ready and return `-1`.
 - Voltage uses the 14-bit value at `0x02–0x03`, converted as `raw × 312.5 µV`, and returned in mV.
 - Transactions use a 100 ms timeout at 100 kHz.
-- A missing device returns `ESP_ERR_NOT_FOUND`; the battery page is disabled without stopping the application.
+- A missing device returns `ESP_ERR_NOT_FOUND`; the FMO application keeps the battery worker and shows an unknown reading. Visible SOC requests retry failed initialization at most once a minute, without resetting an already-initialized gauge on invalid runtime readings. Calls must be serialized in a worker without holding the LVGL lock.
+- Profile updates verify sleep mode, clear and verify the update flag before writing, verify all 80 bytes and the final update flag, then restart and verify active mode. Failed initialization removes its device handle for a later retry.
 
 Accurate production SOC requires the cell parameters, CW2017 datasheet/vendor profile, and full charge/discharge validation.
 

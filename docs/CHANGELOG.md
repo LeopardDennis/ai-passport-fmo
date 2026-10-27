@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+- Remove the new-password hint from the phone Wi-Fi password field and request autocomplete off on the form and field, with correction, capitalization and spellcheck disabled. Keep masked entry and the existing submission flow. System password-manager prompts remain browser-controlled and need iPhone validation.
+
+- Recover battery display after failed startup initialization: retain the sampling worker and retry unavailable readings once a minute while awake. Port the verified original-cell profile initialization and bounded retry from PDKPASS; preserve two-minute healthy polling, pause while dark and sample on wake. Add driver fault-injection and application scheduling regressions. Deep-discharge recovery still requires device validation.
+
 - Show city plus district/county in the speaker location row, handle municipality and inverted administrative fields, shorten suffixes for display, and refresh legacy single-region caches. Add long-UP/DOWN station paging with row retention and bounded first/last-page behavior; cover parsing, button routing and native layout.
 
 - Reduce place-name latency: rate-limit request starts to three seconds instead of waiting 15 seconds after completion, shorten failed-coordinate caching to 30 seconds, and use bounded exponential failure backoff with a 60-second minimum for HTTP 429/503. Preserve immediate cache access during cooldowns and fill empty cache slots before evicting persisted places. Add duration/cache-hit logs and timing regressions for speaker changes, slow connections, temporary failures and throttling.

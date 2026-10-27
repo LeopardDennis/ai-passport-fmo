@@ -128,6 +128,12 @@ the regular built-in weight, and Noto Sans CJK covers Chinese channel names, not
 Status and controls are in Chinese; callsigns, network names and addresses stay
 unchanged. The iOS-inspired battery capsule contains a numeric percentage, turns
 red at 20% or below, and shows an outlined unknown state when SOC is unavailable.
+Unavailable readings are retried once a minute while the screen is awake, including
+a failed startup initialization. Healthy readings retain the two-minute interval;
+screen-off polling pauses and wake requests an immediate sample. Initialization
+retries restore and verify the original-cell profile when needed; invalid runtime
+readings do not periodically reset an already-initialized gauge. Recovery after
+a depleted battery still requires physical-device validation.
 It does not infer charging. Channel and callsign text is centered using visible
 glyph bounds, including smaller fonts for long callsigns and setup passwords.
 
@@ -225,7 +231,10 @@ to open the connection QR. Join the
 `FMO-Setup-XXXX` network using the random password shown on the Passport screen.
 Keep the phone connected even if it reports no Internet, then open
 `http://192.168.9.1` manually. Choose a nearby 2.4 GHz Wi-Fi network or type a
-hidden SSID, enter its password, and submit. The list is scanned once per setup
+hidden SSID, enter its password, and submit. The password field does not request
+a new password; the form and field request autocomplete off, with correction,
+capitalization and spellcheck disabled. System password-manager suggestions may
+still appear. The list is scanned once per setup
 session. A failed connection can be retried without rebooting.
 When retrying a different network, the setup hotspot may briefly disconnect;
 rejoin it with the displayed password if the page stops responding.

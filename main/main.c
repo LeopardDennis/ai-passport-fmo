@@ -257,12 +257,15 @@ static void battery_task(void *argument)
 {
     (void)argument;
     for (;;) {
+        uint32_t poll_ms = 120000;
         if (!atomic_load(&s_display_dark)) {
             app_input_t input = { .type = APP_INPUT_BATTERY, .value = bsp_battery_soc() };
             xQueueSend(s_input_queue, &input, 0);
+            // Failed initialization is retried by the BSP, at most once a minute.
+            if (input.value < 0) poll_ms = 60000;
         }
         ESP_LOGD(TAG, "Battery stack free=%u", (unsigned)uxTaskGetStackHighWaterMark(NULL));
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120000));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(poll_ms));
     }
 }
 
@@ -300,10 +303,11 @@ void app_main(void)
         ESP_LOGW(TAG, "Buttons unavailable; monitor will continue automatically");
     }
 
-    if (bsp_battery_init() == ESP_OK) {
-        if (xTaskCreate(battery_task, "battery_monitor", 2048, NULL, 2, &s_battery_task) != pdPASS)
-            ESP_LOGW(TAG, "Battery worker unavailable");
-    }
+    if (bsp_battery_init() != ESP_OK)
+        ESP_LOGW(TAG, "Battery initialization failed; worker will retry while display is awake");
+    // Keep sampling after startup failure so charging/gauge recovery can restore SOC.
+    if (xTaskCreate(battery_task, "battery_monitor", 2048, NULL, 2, &s_battery_task) != pdPASS)
+        ESP_LOGW(TAG, "Battery worker unavailable");
 
     fmo_audio_set_volume(s_controls.audio_enabled ? s_controls.volume : 0);
     esp_err_t audio_err = fmo_audio_start();

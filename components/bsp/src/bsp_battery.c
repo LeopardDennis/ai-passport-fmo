@@ -1,12 +1,14 @@
 // components/bsp/src/bsp_battery.c
-// CW2017 电量计驱动。
+// 移植自 trae_card/components/platform/platform_esp32/src/battery_cw2017.c
+// 使用官方原装电芯 profile；更换电芯时必须重新匹配厂家参数。
 #include "bsp_battery.h"
+#include <stdbool.h>
 #include "bsp_i2c.h"
 #include "bsp_pins.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <stdbool.h>
 
 static const char *TAG = "bsp_batt";
 
@@ -14,15 +16,15 @@ static const char *TAG = "bsp_batt";
 #define CW_REG_VCELL_H   0x02   // 14bit 电压,V(uV) = raw * 312.5
 #define CW_REG_SOC_H     0x04   // 高字节 = 整数百分比;低字节(0x05)= 1/256 %
 #define CW_REG_CONFIG    0x08   // 0xF0=睡眠 / 0x30=复位态 / 0x00=正常
-#define CW_REG_SOC_ALERT 0x0B   // bit7=profile UPDATE_FLAG;bit6:0=SOC 告警阈值
-#define CW_REG_PROFILE   0x10   // 80 字节电池 profile 起始地址
 
-#define CW_CONFIG_ACTIVE  0x00
-#define CW_CONFIG_RESTART 0x30
-#define CW_CONFIG_SLEEP   0xF0
-#define CW_UPDATE_FLAG    0x80
-#define CW_PROFILE_SIZE   80
+#define CW_REG_SOC_ALERT 0x0B
+#define CW_REG_PROFILE   0x10
+#define CW_UPDATE_FLAG   0x80
+#define CW_PROFILE_SIZE  80
 
+// Original-cell vendor profile from FoloToy/ai-passport commit
+// a06235e4c94361e3f8a2d498930254101718acae. Do not use for replacement cells
+// without matching supplier parameters and charge/discharge validation.
 static const uint8_t s_battery_profile[CW_PROFILE_SIZE] = {
     0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0xAD, 0xC7, 0xC8, 0xCA, 0xBD, 0xB1, 0xC1, 0x94,
@@ -35,11 +37,14 @@ static const uint8_t s_battery_profile[CW_PROFILE_SIZE] = {
     0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5C,
 };
-
 _Static_assert(sizeof(s_battery_profile) == CW_PROFILE_SIZE,
                "CW2017 battery profile must contain exactly 80 bytes");
 
+#define CW_INIT_RETRY_US (60LL * 1000000LL)
+
+// Serialized by the caller; failed initialization retries on visible SOC requests.
 static i2c_master_dev_handle_t s_dev;
+static int64_t s_init_retry_at_us;
 
 static int cw_read(uint8_t reg, uint8_t *buf, size_t n) {
     if (!s_dev) return -1;
@@ -52,78 +57,81 @@ static int cw_write(uint8_t reg, uint8_t val) {
     return i2c_master_transmit(s_dev, b, 2, 100) == ESP_OK ? 0 : -1;
 }
 
-// CONFIG 的低 4 bit 为保留位。复位、睡眠和激活均按芯片规定的时序切换。
-static int cw_enter_sleep(void) {
-    if (cw_write(CW_REG_CONFIG, CW_CONFIG_RESTART) != 0) return -1;
+// CW2017-DS V1.1, Power State / CONFIG (0x08). This restarts the
+// gauge using its existing profile; it does not change cell parameters.
+static esp_err_t cw_restart(void) {
+    uint8_t config;
+    if (cw_write(CW_REG_CONFIG, 0x30) != 0) return ESP_FAIL;
     vTaskDelay(pdMS_TO_TICKS(20));
-    if (cw_write(CW_REG_CONFIG, CW_CONFIG_SLEEP) != 0) return -1;
-    vTaskDelay(pdMS_TO_TICKS(10));
-    return 0;
+    if (cw_write(CW_REG_CONFIG, 0x00) != 0) return ESP_FAIL;
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (cw_read(CW_REG_CONFIG, &config, 1) != 0 ||
+        (config & 0xF0U) != 0) return ESP_FAIL;
+    return ESP_OK;
 }
 
-static int cw_enter_active(void) {
-    if (cw_write(CW_REG_CONFIG, CW_CONFIG_RESTART) != 0) return -1;
-    vTaskDelay(pdMS_TO_TICKS(20));
-    if (cw_write(CW_REG_CONFIG, CW_CONFIG_ACTIVE) != 0) return -1;
-    vTaskDelay(pdMS_TO_TICKS(10));
-    return 0;
+static esp_err_t cw_ensure_active(void) {
+    uint8_t config;
+    if (cw_read(CW_REG_CONFIG, &config, 1) != 0) return ESP_FAIL;
+    // Preserve the estimate of an already-running gauge on MCU reboot.
+    return (config & 0xF0U) == 0 ? ESP_OK : cw_restart();
 }
 
-// 同时检查 UPDATE_FLAG 和 80 字节内容，避免只凭标志误用旧电芯参数。
-static int cw_profile_matches(bool *matches) {
-    uint8_t val = 0;
+static esp_err_t cw_profile_matches(bool *matches) {
+    uint8_t value;
     *matches = false;
-
-    if (cw_read(CW_REG_SOC_ALERT, &val, 1) != 0) return -1;
-    if ((val & CW_UPDATE_FLAG) == 0) return 0;
-
-    for (size_t i = 0; i < CW_PROFILE_SIZE; i++) {
-        if (cw_read((uint8_t)(CW_REG_PROFILE + i), &val, 1) != 0) return -1;
-        if (val != s_battery_profile[i]) return 0;
+    if (cw_read(CW_REG_SOC_ALERT, &value, 1) != 0) return ESP_FAIL;
+    if ((value & CW_UPDATE_FLAG) == 0) return ESP_OK;
+    for (unsigned i = 0; i < CW_PROFILE_SIZE; ++i) {
+        if (cw_read(CW_REG_PROFILE + i, &value, 1) != 0) return ESP_FAIL;
+        if (value != s_battery_profile[i]) return ESP_OK;
     }
-
     *matches = true;
-    return 0;
+    return ESP_OK;
 }
 
-// Profile 必须在睡眠态逐字节写入，读回校验后置 UPDATE_FLAG，再重启计算。
-static int cw_update_profile(void) {
-    uint8_t val = 0;
-    if (cw_enter_sleep() != 0) return -1;
-
-    for (size_t i = 0; i < CW_PROFILE_SIZE; i++) {
-        if (cw_write((uint8_t)(CW_REG_PROFILE + i), s_battery_profile[i]) != 0) {
-            ESP_LOGE(TAG, "写 profile 失败:index=%u", (unsigned)i);
-            return -1;
-        }
+static esp_err_t cw_update_profile(void) {
+    uint8_t value, alert;
+    if (cw_write(CW_REG_CONFIG, 0x30) != 0) return ESP_FAIL;
+    vTaskDelay(pdMS_TO_TICKS(20));
+    if (cw_write(CW_REG_CONFIG, 0xF0) != 0) return ESP_FAIL;
+    vTaskDelay(pdMS_TO_TICKS(10));
+    if (cw_read(CW_REG_CONFIG, &value, 1) != 0 || value != 0xF0)
+        return ESP_FAIL;
+    if (cw_read(CW_REG_SOC_ALERT, &alert, 1) != 0) return ESP_FAIL;
+    // A failed/partial update must not leave the profile marked as complete.
+    alert &= ~CW_UPDATE_FLAG;
+    if (cw_write(CW_REG_SOC_ALERT, alert) != 0) return ESP_FAIL;
+    if (cw_read(CW_REG_SOC_ALERT, &value, 1) != 0 || value != alert)
+        return ESP_FAIL;
+    for (unsigned i = 0; i < CW_PROFILE_SIZE; ++i) {
+        if (cw_write(CW_REG_PROFILE + i, s_battery_profile[i]) != 0)
+            return ESP_FAIL;
     }
-
-    for (size_t i = 0; i < CW_PROFILE_SIZE; i++) {
-        if (cw_read((uint8_t)(CW_REG_PROFILE + i), &val, 1) != 0) return -1;
-        if (val != s_battery_profile[i]) {
-            ESP_LOGE(TAG, "profile 校验失败:index=%u expected=0x%02X actual=0x%02X",
-                     (unsigned)i, s_battery_profile[i], val);
-            return -1;
-        }
+    for (unsigned i = 0; i < CW_PROFILE_SIZE; ++i) {
+        if (cw_read(CW_REG_PROFILE + i, &value, 1) != 0 ||
+            value != s_battery_profile[i]) return ESP_FAIL;
     }
-
-    if (cw_read(CW_REG_SOC_ALERT, &val, 1) != 0) return -1;
-    if (cw_write(CW_REG_SOC_ALERT, val | CW_UPDATE_FLAG) != 0) return -1;
-    return cw_enter_active();
+    alert |= CW_UPDATE_FLAG;
+    if (cw_write(CW_REG_SOC_ALERT, alert) != 0) return ESP_FAIL;
+    if (cw_read(CW_REG_SOC_ALERT, &value, 1) != 0 || value != alert)
+        return ESP_FAIL;
+    return cw_restart();
 }
 
-// 首次计算期间 SOC 可能暂时大于 100；最多等待 5 秒再判定初始化失败。
-static int cw_wait_soc_ready(void) {
-    for (int retry = 0; retry < 50; retry++) {
-        uint8_t soc = 0;
+static esp_err_t cw_wait_soc_ready(void) {
+    for (unsigned retry = 0; retry < 50; ++retry) {
+        uint8_t soc[2];
         vTaskDelay(pdMS_TO_TICKS(100));
-        if (cw_read(CW_REG_SOC_H, &soc, 1) == 0 && soc <= 100) return 0;
+        if (cw_read(CW_REG_SOC_H, soc, sizeof(soc)) != 0) return ESP_FAIL;
+        if (soc[0] <= 100) return ESP_OK;
     }
-    return -1;
+    return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t bsp_battery_init(void) {
     if (s_dev) return ESP_OK;
+    s_init_retry_at_us = esp_timer_get_time() + CW_INIT_RETRY_US;
 
     esp_err_t e = bsp_i2c_init();
     if (e != ESP_OK) return e;
@@ -138,61 +146,42 @@ esp_err_t bsp_battery_init(void) {
 
     uint8_t ver = 0;
     if (cw_read(CW_REG_VERSION, &ver, 1) != 0) {
-        ESP_LOGW(TAG, "CW2017 未应答 —— 用 bsp_i2c_scan() 确认 0x%02X 是否在线;"
+        ESP_LOGW(TAG, "CW2017 未应答，检查 0x%02X 是否在线;"
                       "无电量计的板子可忽略本项", BSP_I2C_CW2017_ADDR);
         i2c_master_bus_rm_device(s_dev);
         s_dev = NULL;
         return ESP_ERR_NOT_FOUND;
     }
-    ESP_LOGI(TAG, "检测到 CW2017 VERSION=0x%02X", ver);
 
-    bool profile_matches = false;
-    if (cw_profile_matches(&profile_matches) != 0) {
-        ESP_LOGE(TAG, "读取电池 profile 失败");
-        e = ESP_FAIL;
-        goto fail;
-    }
-
-    if (!profile_matches) {
-        ESP_LOGI(TAG, "写入优特利 520mAh 自定义 profile");
-        if (cw_update_profile() != 0) {
-            ESP_LOGE(TAG, "自定义 profile 写入失败");
-            e = ESP_FAIL;
-            goto fail;
+    bool matches = false;
+    e = cw_profile_matches(&matches);
+    if (e == ESP_OK) {
+        if (matches) {
+            e = cw_ensure_active();
+        } else {
+            e = cw_update_profile();
         }
-    } else {
-        uint8_t config = 0;
-        if (cw_read(CW_REG_CONFIG, &config, 1) != 0) {
-            e = ESP_FAIL;
-            goto fail;
-        }
-        if (config != CW_CONFIG_ACTIVE && cw_enter_active() != 0) {
-            e = ESP_FAIL;
-            goto fail;
-        }
-        ESP_LOGI(TAG, "优特利 520mAh profile 已匹配");
     }
-
-    if (cw_wait_soc_ready() != 0) {
-        ESP_LOGE(TAG, "等待首次 SOC 计算超时");
-        e = ESP_ERR_TIMEOUT;
-        goto fail;
+    if (e == ESP_OK) e = cw_wait_soc_ready();
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "CW2017 profile/mode/SOC initialization failed: %s", esp_err_to_name(e));
+        i2c_master_bus_rm_device(s_dev);
+        s_dev = NULL;
+        return e;
     }
-
     return ESP_OK;
-
-fail:
-    i2c_master_bus_rm_device(s_dev);
-    s_dev = NULL;
-    return e;
 }
 
 int bsp_battery_soc(void) {
+    int64_t now = esp_timer_get_time();
+    if (!s_dev && (now < s_init_retry_at_us || bsp_battery_init() != ESP_OK))
+        return -1;
+
     uint8_t b[2] = { 0 };
     if (cw_read(CW_REG_SOC_H, b, 2) != 0) return -1;
-    int soc = b[0];                       // 高字节即整数百分比
-    if (soc > 100) return -1;             // 芯片未就绪时可能读到 0xFF
-    return soc;
+    // Invalid runtime samples remain unavailable; do not periodically reset
+    // an already-initialized gauge or invent SOC from voltage.
+    return b[0] <= 100 ? b[0] : -1;
 }
 
 int bsp_battery_mv(void) {
