@@ -138,7 +138,7 @@ retries restore and verify the original-cell profile when needed; invalid runtim
 readings do not periodically reset an already-initialized gauge. Recovery after
 a depleted battery still requires physical-device validation.
 It does not infer charging. Channel and callsign text is centered using visible
-glyph bounds, including smaller fonts for long callsigns and setup passwords.
+glyph bounds, including smaller fonts for long setup passwords.
 
 The yellow panel is titled `QSO` and shows the two most recent contacts reported
 by FMO, newest first. Each record uses two lines: a white bold callsign followed
@@ -153,8 +153,10 @@ settings are not queried for these rows. Status, bold callsign and the yellow
 PCM level bar remain above the panel. Status reads in contact during a transmission
 and last contact after release. The speaker grid is shown beside the callsign
 in a separate small gray label, retained after release until the next speaker;
-long callsigns scroll within
-the remaining width without overlapping it.
+callsigns retain a fixed 32 px font and a 4 px gap to the grid. Only the grid
+font becomes smaller when needed, preserving six-character alphanumeric callsigns
+and the complete grid on one line without scrolling or ellipsis. QSO callsigns
+also remain static.
 
 The header shows the current time between FMO and the battery as `HH:MM`, in
 Beijing time (UTC+8). Wi-Fi starts a non-blocking SNTP service using
@@ -188,7 +190,7 @@ logs report connection changes and aggregate received bytes, discarded samples
 and invalid messages, committed/pending samples, output/source samples and
 maximum codec-write duration and buffer-wait time every 30 seconds, without conversation content.
 Audio continues while the LCD sleeps. No microphone capture, recording or
-transmit/PTT commands are added. The connection row shows status on the left and a right-aligned audio percentage on the right, aligned with the channel panel edge. It displays the selected volume while audio is enabled and 0% while muted. The single-line footer uses a 14 px font to describe short confirm for the station list and long confirm for Wi-Fi setup. The network menu and Wi-Fi list show UP/DOWN selection and long-confirm return; the station footer shows long-UP/DOWN paging and long-confirm return. All page footers use the same 14 px font, one centered line and consistent Chinese names for the confirm key; empty Wi-Fi lists and station loading/retry states show applicable actions. Callsigns stay at 32 px; long callsigns scroll without shrinking. Set volume to 0% to silence playback.
+transmit/PTT commands are added. The connection row shows status on the left and a right-aligned audio percentage on the right, aligned with the channel panel edge. It displays the selected volume while audio is enabled and 0% while muted. The single-line footer uses a 14 px font to describe short confirm for the station list and long confirm for Wi-Fi setup. The network menu and Wi-Fi list show UP/DOWN selection and long-confirm return; the station footer shows long-UP/DOWN paging and long-confirm return. All page footers use the same 14 px font, one centered line and consistent Chinese names for the confirm key; empty Wi-Fi lists and station loading/retry states show applicable actions. Callsigns stay at 32 px without scrolling or adaptive sizing; only the grid font adapts to the available width. Set volume to 0% to silence playback.
 With no active speech, the middle shows the last-heard callsign in bold white;
 before the first contact it shows `--` and a waiting-for-speech hint.
 Runtime sound settings reset on reboot; `CONFIG_FMO_VOLUME` sets initial volume.

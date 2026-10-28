@@ -41,6 +41,14 @@
 LV_FONT_DECLARE(fmo_channel_font);
 LV_FONT_DECLARE(fmo_callsign_bold_14);
 LV_FONT_DECLARE(fmo_callsign_bold_32);
+LV_FONT_DECLARE(fmo_grid_14);
+LV_FONT_DECLARE(fmo_grid_12);
+LV_FONT_DECLARE(fmo_grid_10);
+LV_FONT_DECLARE(fmo_grid_8);
+LV_FONT_DECLARE(fmo_grid_6);
+LV_FONT_DECLARE(fmo_grid_4);
+LV_FONT_DECLARE(fmo_grid_2);
+
 
 static lv_obj_t *audio_label, *link_label, *battery_label, *channel_label, *clock_label;
 static lv_obj_t *battery_body;
@@ -718,7 +726,7 @@ static void create_monitor(void)
         int top = QSO_ROWS_TOP + QSO_ROW_HEIGHT * i;
         qso_labels[i] = label(qso_panel, 10, top, 196,
                              &fmo_callsign_bold_14, MUTED, "--");
-        lv_label_set_long_mode(qso_labels[i], LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_label_set_long_mode(qso_labels[i], LV_LABEL_LONG_CLIP);
         lv_obj_set_height(qso_labels[i], fmo_callsign_bold_14.line_height);
         center_ink(qso_labels[i], top, QSO_TEXT_HEIGHT, 'H');
         memcpy(qso_times[i], "---------- --:--:--", sizeof(qso_times[i]));
@@ -729,9 +737,10 @@ static void create_monitor(void)
     air_label = label(screen, 12, AIR_TOP, 216, &fmo_channel_font, MUTED, "等待电台发言");
     center_ink(air_label, AIR_TOP, AIR_HEIGHT, 'H');
     callsign_label = label(screen, 12, CALLSIGN_TOP, 216, &fmo_callsign_bold_32, WHITE, "--");
-    lv_label_set_long_mode(callsign_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_long_mode(callsign_label, LV_LABEL_LONG_CLIP);
     center_ink(callsign_label, CALLSIGN_TOP, 32, 'H');
     grid_label = label(screen, 12, CALLSIGN_TOP, 80, &fmo_channel_font, GRID_COLOR, "");
+    lv_label_set_long_mode(grid_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_height(grid_label, fmo_channel_font.line_height);
     lv_obj_add_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
     audio_bar_width = 0;
@@ -813,8 +822,8 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     color(air_label, speaking || setup ? ORANGE : MUTED);
     bool call_changed = text(callsign_label, call);
     color(callsign_label, speaking ? (s->speaker_cross_server ? CROSS_SERVER_COLOR : ORANGE) : WHITE);
-    /* Use real bold glyphs for callsigns; keep setup passwords in regular text.
-     * Callsigns always use 32px; long values scroll within the grid boundary. */
+    /* Keep callsigns at the original 32px; only the grid may become smaller.
+     * Six-character alphanumeric callsigns fit without scrolling or ellipsis. */
     const lv_font_t *large = setup ? &lv_font_montserrat_32 : &fmo_callsign_bold_32;
     /* A release retains the last speaker's grid; the next start replaces it,
      * including clearing it when that talker supplies no grid. */
@@ -842,23 +851,44 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     }
     bool grid_changed = text(grid_label, grid);
     if (!callsign_layout_valid || call_changed || grid_changed || setup != callsign_setup) {
-        lv_point_t grid_size = {0}, size;
-        if (grid[0]) lv_text_get_size(&grid_size, grid, &fmo_channel_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        if (grid_size.x > 80) grid_size.x = 80;
-        int call_space = 216 - (grid[0] ? grid_size.x + 8 : 0);
+        lv_point_t size;
         lv_text_get_size(&size, call, large, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        const lv_font_t *font = setup && size.x > call_space ? &lv_font_montserrat_20 : large;
+        const lv_font_t *font = setup && size.x > 216 ? &lv_font_montserrat_20 : large;
         if (lv_obj_get_style_text_font(callsign_label, 0) != font)
             lv_obj_set_style_text_font(callsign_label, font, 0);
         if (font != large)
             lv_text_get_size(&size, call, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        int call_width = grid[0] && size.x < call_space ? size.x : call_space;
+        int call_width = size.x < 216 ? size.x : 216;
         lv_obj_set_width(callsign_label, call_width);
+        lv_obj_set_height(callsign_label, font->line_height);
         center_ink(callsign_label, CALLSIGN_TOP, 32, 'H');
-        if (grid[0]) {
+        int grid_space = 216 - call_width - 4;
+        if (grid[0] && grid_space > 0) {
+            /* Pre-rasterized sizes avoid transformed layers and runtime bitmap
+             * allocations on the no-PSRAM board. Preserve the full grid text. */
+            static const lv_font_t *const fonts[] = {
+                &fmo_channel_font, &fmo_grid_14, &fmo_grid_12, &fmo_grid_10,
+                &fmo_grid_8, &fmo_grid_6, &fmo_grid_4, &fmo_grid_2
+            };
+            const lv_font_t *grid_font = fonts[0];
+            lv_point_t grid_size;
+            int grid_letter_space = 0;
+            for (unsigned i = 0; i < sizeof(fonts) / sizeof(fonts[0]); ++i) {
+                grid_font = fonts[i];
+                grid_letter_space = 0;
+                lv_text_get_size(&grid_size, grid, grid_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+                if (grid_size.x <= grid_space) break;
+                /* Tighten only the grid before trying a smaller raster size. */
+                grid_letter_space = -1;
+                lv_text_get_size(&grid_size, grid, grid_font, -1, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+                if (grid_size.x <= grid_space) break;
+            }
             lv_obj_remove_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_x(grid_label, 12 + call_width + 8);
-            lv_obj_set_width(grid_label, grid_size.x);
+            lv_obj_set_style_text_font(grid_label, grid_font, 0);
+            lv_obj_set_style_text_letter_space(grid_label, grid_letter_space, 0);
+            lv_obj_set_x(grid_label, 12 + call_width + 4);
+            lv_obj_set_width(grid_label, grid_size.x < grid_space ? grid_size.x : grid_space);
+            lv_obj_set_height(grid_label, grid_font->line_height);
             center_ink(grid_label, CALLSIGN_TOP, 32, 'H');
         } else lv_obj_add_flag(grid_label, LV_OBJ_FLAG_HIDDEN);
         callsign_layout_valid = true;

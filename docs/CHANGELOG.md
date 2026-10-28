@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Keep callsigns static at the original 32 px with a 4 px grid gap; shrink only the grid font to keep six-character alphanumeric callsigns and their grids on one line without scrolling or ellipsis. Disable QSO callsign scrolling and verify the reported BA4SML/OM93nm layout and wide callsigns across animation ticks. Use small pre-rasterized Noto grid fonts without transformed display layers.
+
 - Save the FMO host and port with each Wi-Fi profile, submit both together after verified DHCP, and restore the matching destination for events, control and audio after switching networks. Migrate legacy global addresses, refill the setup form when selecting saved networks, and cover reboot, migration, deletion and storage-failure behavior.
 
 - Scroll overflowing place names within their own viewport at 30 pixels per second, pausing at both ends; keep bearing and distance fixed. Reuse the awake 50 ms UI timer without new widgets, preserve animation across unchanged snapshots, and verify clipping, motion and menu lifecycle.

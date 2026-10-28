@@ -78,3 +78,17 @@ lv_font_conv --size 14 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/f
 lv_font_conv --size 20 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_20.c
 lv_font_conv --size 32 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_32.c
 ```
+
+## FMO grid fonts
+
+`fonts/fmo_grid_*.c` are 2/4/6/8/10/12/14 px printable-ASCII subsets of the existing
+Noto Sans CJK source, under the same SIL OFL 1.1 license (`fonts/OFL.txt`). The UI
+uses the existing 16 px font whenever it fits; smaller grids preserve the original
+32 px callsign size. These static 2 bpp, uncompressed fonts avoid runtime image
+scaling and extra LVGL layers. Regenerate with `lv_font_conv@1.5.3`:
+
+```bash
+for size in 2 4 6 8 10 12 14; do
+    lv_font_conv --font assets/fonts/NotoSansCJKsc-Regular.otf --range 0x20-0x7e --size "$size" --bpp 2 --no-kerning --no-compress --format lvgl --lv-font-name "fmo_grid_$size" --lv-include lvgl.h --output "assets/fonts/fmo_grid_$size.c"
+done
+```

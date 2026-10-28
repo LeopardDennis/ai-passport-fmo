@@ -69,3 +69,16 @@ lv_font_conv --size 14 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/f
 lv_font_conv --size 20 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_20.c
 lv_font_conv --size 32 --bpp 4 --format lvgl --lv-include lvgl.h --font assets/fonts/Montserrat-Bold.ttf -r 0x20-0x7e --no-compress --no-prefilter --force-fast-kern-format -o assets/fonts/fmo_callsign_bold_32.c
 ```
+
+## FMO 网格码字体
+
+`fonts/fmo_grid_*.c` 是现有 Noto Sans CJK 源字体的 2／4／6／8／10／12／14px
+可打印 ASCII 子集，沿用 SIL OFL 1.1 许可（`fonts/OFL.txt`）。空间充足时仍使用原
+16px 字体，空间不足时只缩小网格，保留呼号原来的 32px。字库为静态 2bpp 未压缩
+格式，避免运行时图像缩放及额外 LVGL 图层。用 `lv_font_conv@1.5.3` 重新生成：
+
+```bash
+for size in 2 4 6 8 10 12 14; do
+    lv_font_conv --font assets/fonts/NotoSansCJKsc-Regular.otf --range 0x20-0x7e --size "$size" --bpp 2 --no-kerning --no-compress --format lvgl --lv-font-name "fmo_grid_$size" --lv-include lvgl.h --output "assets/fonts/fmo_grid_$size.c"
+done
+```

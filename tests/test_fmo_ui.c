@@ -524,7 +524,7 @@ int main(int argc, char **argv)
     lv_obj_t *live_call=find_text(lv_screen_active(),"BG5ESN");
     lv_obj_t *live_grid=find_text(lv_screen_active(),"PM01");
     assert(lv_obj_get_style_text_font(live_grid,0)==&fmo_channel_font);
-    assert(lv_obj_get_x(live_grid)>=lv_obj_get_x(live_call)+lv_obj_get_width(live_call)+8);
+    assert(lv_obj_get_x(live_grid)>=lv_obj_get_x(live_call)+lv_obj_get_width(live_call)+4);
     assert(lv_obj_get_x(live_grid)+lv_obj_get_width(live_grid)<=228);
     assert(lv_obj_get_style_text_font(find_text(lv_screen_active(), "BG5ESN"), 0) == &fmo_callsign_bold_32);
     assert(find_text(lv_screen_active(), "PM01"));
@@ -742,6 +742,12 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "long")) {
         strcpy(state.history.entries[0].callsign,"BG5ESN/12345678");
     }
+    if (argc > 1 && !strcmp(argv[1], "call_photo"))
+        fmo_monitor_apply_speaker(&state,"BA4SML","OM93nm",true,false,false,12000);
+    if (argc > 1 && !strcmp(argv[1], "call_large"))
+        fmo_monitor_apply_speaker(&state,"BH4WWW","OM93nm",true,false,false,12000);
+    if (argc > 1 && !strcmp(argv[1], "call_wide"))
+        fmo_monitor_apply_speaker(&state,"WW4WWW","MM99mm",true,false,false,12000);
     if (argc > 1 && !strcmp(argv[1], "symbols")) fmo_monitor_set_channel(&state, 42, "“洛阳”·①台—★");
     if (argc > 1 && !strcmp(argv[1], "brackets")) fmo_monitor_set_channel(&state, 42, "面包圈（洛）");
     if (argc > 1 && !strcmp(argv[1], "rare")) fmo_monitor_set_channel(&state, 42, "龍龠龯");
@@ -793,7 +799,7 @@ int main(int argc, char **argv)
         assert(call && grid);
         lv_area_t a, b;
         lv_obj_get_coords(call, &a); lv_obj_get_coords(grid, &b);
-        assert(b.x1 >= a.x2 + 8 && b.x2 <= 227);
+        assert(b.x1 == a.x2 + 5 && b.x2 <= 227);
         lv_obj_t *panel = lv_obj_get_parent(find_text(lv_screen_active(), "QSO"));
         assert(lv_obj_get_child_count(panel) == 3); /* Only the title and two records are inside. */
         const char *place = find_location_above_qso(panel);
@@ -1016,6 +1022,32 @@ int main(int argc, char **argv)
         assert(size.x <= 216); /* Key actions must fit with no ellipsis. */
         assert(lv_obj_get_style_text_font(hint,0)==fmo_wifi_font());
         assert(lv_obj_get_height(hint)==fmo_wifi_font()->line_height);
+    }
+    if (argc > 1 && (!strcmp(argv[1],"call_photo") || !strcmp(argv[1],"call_wide") || !strcmp(argv[1],"call_large"))) {
+        lv_obj_t *call=find_text(lv_screen_active(),state.last_speaker);
+        lv_obj_t *grid=find_text(lv_screen_active(),state.grid);
+        assert(call && grid);
+        assert(lv_obj_get_style_text_font(call,0)==&fmo_callsign_bold_32);
+        assert(lv_label_get_long_mode(call)==LV_LABEL_LONG_CLIP);
+        lv_point_t size;lv_text_get_size(&size,state.last_speaker,&fmo_callsign_bold_32,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        assert(size.x<=lv_obj_get_width(call));
+        const lv_font_t *grid_font=lv_obj_get_style_text_font(grid,0);
+        lv_text_get_size(&size,state.grid,grid_font,lv_obj_get_style_text_letter_space(grid,0),0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        assert(size.x<=lv_obj_get_width(grid));
+        assert(lv_label_get_long_mode(grid)==LV_LABEL_LONG_CLIP);
+        assert((grid_font==&fmo_channel_font)==!strcmp(argv[1],"call_photo"));
+        assert(lv_obj_get_x(grid)==lv_obj_get_x(call)+lv_obj_get_width(call)+4);
+        assert(lv_obj_get_x(grid)+lv_obj_get_width(grid)<=228);
+        uint16_t before[240*32];memcpy(before,pixels+240*116,sizeof(before));
+        lv_tick_inc(2000);lv_timer_handler();lv_refr_now(display);
+        assert(((lv_label_t *)call)->offset.x==0);
+        assert(!memcmp(before,pixels+240*116,sizeof(before)));
+        lv_obj_t *panel=lv_obj_get_parent(find_text(lv_screen_active(),"QSO"));
+        for(unsigned i=0;i<lv_obj_get_child_count(panel);++i) {
+            lv_obj_t *child=lv_obj_get_child(panel,i);
+            if(lv_obj_get_style_text_font(child,0)==&fmo_callsign_bold_14)
+                assert(lv_label_get_long_mode(child)==LV_LABEL_LONG_CLIP);
+        }
     }
     if (argc > 1 && !strcmp(argv[1],"wifi_long")) {
         lv_obj_t *selected=find_text(lv_screen_active(),controls.wifi.names[controls.selection]);
