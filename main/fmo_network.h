@@ -59,7 +59,7 @@ bool fmo_network_request_wifi(const char *ssid);
 void fmo_network_cancel_setup(void);
 
 /* Nonblocking; false means another request or state publication owns the lock. */
-bool fmo_network_request_stations(uint32_t start);
+bool fmo_network_request_stations(fmo_station_category_t category, uint32_t start);
 bool fmo_network_switch_station(uint32_t uid);
 
 /* Background geocoder only. Copies/publishes under the network state lock. */

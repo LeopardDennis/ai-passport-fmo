@@ -27,8 +27,29 @@ void fmo_controls_observe_setup(fmo_controls_t *c, bool active)
 }
 fmo_action_t fmo_controls_key(fmo_controls_t *c, fmo_key_t key)
 {
-    if (c->view == FMO_VIEW_STATIONS) {
+    if (c->view == FMO_VIEW_STATION_MENU) {
         if (key == FMO_KEY_BACK) { c->view = FMO_VIEW_MONITOR; return FMO_ACTION_NONE; }
+        if (key == FMO_KEY_UP) c->selection = (c->selection + 2) % 3;
+        if (key == FMO_KEY_DOWN) c->selection = (c->selection + 1) % 3;
+        if (key == FMO_KEY_OK && c->stations.request == FMO_STATION_NONE) {
+            static const fmo_station_category_t categories[] = {
+                FMO_STATION_PINNED, FMO_STATION_ACTIVE, FMO_STATION_ALL
+            };
+            c->station_menu_selection = c->selection % 3;
+            memset(&c->stations, 0, sizeof(c->stations));
+            c->stations.category = categories[c->station_menu_selection];
+            c->selection = 0;
+            c->view = FMO_VIEW_STATIONS;
+            return FMO_ACTION_STATIONS;
+        }
+        return FMO_ACTION_NONE;
+    }
+    if (c->view == FMO_VIEW_STATIONS) {
+        if (key == FMO_KEY_BACK) {
+            c->view = FMO_VIEW_STATION_MENU;
+            c->selection = c->station_menu_selection;
+            return FMO_ACTION_NONE;
+        }
         if (c->stations.request != FMO_STATION_NONE) return FMO_ACTION_NONE;
         if (key == FMO_KEY_PAGE_UP || key == FMO_KEY_PAGE_DOWN) {
             if (key == FMO_KEY_PAGE_UP && c->stations.start) {
@@ -117,14 +138,8 @@ fmo_action_t fmo_controls_key(fmo_controls_t *c, fmo_key_t key)
         c->volume = c->volume <= 10 ? 0 : c->volume - 10;
         return FMO_ACTION_VOLUME;
     case FMO_KEY_OK:
-        c->view = FMO_VIEW_STATIONS;
-        if (c->stations.request == FMO_STATION_NONE) {
-            c->selection = 0;
-            c->stations.start = 0;
-            return FMO_ACTION_STATIONS;
-        }
-        for (unsigned i = 0; i < c->stations.count; ++i)
-            if (c->stations.rows[i].uid == c->stations.target_uid) c->selection = i;
+        c->view = FMO_VIEW_STATION_MENU;
+        c->selection = c->station_menu_selection;
         break;
     case FMO_KEY_BACK: c->view = FMO_VIEW_NETWORK; c->selection = 0; break;
     case FMO_KEY_PAGE_UP:

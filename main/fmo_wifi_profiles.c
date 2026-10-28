@@ -12,7 +12,7 @@ static bool valid_entry(const fmo_wifi_credential_t *entry)
 void fmo_wifi_profiles_init(fmo_wifi_profiles_t *profiles)
 {
     memset(profiles, 0, sizeof(*profiles));
-    profiles->version = 1;
+    profiles->version = 2;
 }
 
 int fmo_wifi_profiles_find(const fmo_wifi_profiles_t *profiles, const char *ssid)
@@ -25,11 +25,13 @@ int fmo_wifi_profiles_find(const fmo_wifi_profiles_t *profiles, const char *ssid
 
 bool fmo_wifi_profiles_valid(const fmo_wifi_profiles_t *profiles)
 {
-    if (!profiles || profiles->version != 1 || profiles->reserved != 0 ||
+    if (!profiles || profiles->version != 2 || profiles->reserved != 0 ||
         profiles->count > FMO_WIFI_PROFILE_MAX ||
         (profiles->count ? profiles->preferred >= profiles->count : profiles->preferred != 0)) return false;
     for (unsigned i = 0; i < profiles->count; ++i) {
         if (!valid_entry(&profiles->entries[i])) return false;
+        const fmo_endpoint_t *endpoint = &profiles->endpoints[i];
+        if ((endpoint->host[0] || endpoint->port) && !fmo_endpoint_valid(endpoint)) return false;
         for (unsigned j = 0; j < i; ++j)
             if (strcmp(profiles->entries[i].ssid, profiles->entries[j].ssid) == 0) return false;
     }
@@ -56,6 +58,9 @@ bool fmo_wifi_profiles_remove(fmo_wifi_profiles_t *profiles, const char *ssid)
     if (i < 0) return false;
     memmove(&profiles->entries[i], &profiles->entries[i + 1],
             (profiles->count - (unsigned)i - 1) * sizeof(profiles->entries[0]));
+    memmove(&profiles->endpoints[i], &profiles->endpoints[i + 1],
+            (profiles->count - (unsigned)i - 1) * sizeof(profiles->endpoints[0]));
+    memset(&profiles->endpoints[profiles->count - 1], 0, sizeof(profiles->endpoints[0]));
     memset(&profiles->entries[--profiles->count], 0, sizeof(profiles->entries[0]));
     if (profiles->preferred == i) profiles->preferred = 0;
     else if (profiles->preferred > i) --profiles->preferred;
@@ -73,4 +78,20 @@ int fmo_wifi_profiles_pick(const fmo_wifi_profiles_t *profiles, uint8_t tried,
         if (best < 0 || rssi[i] > rssi[best]) best = (int)i;
     }
     return best;
+}
+
+/* V1 had one global destination. Apply it to every existing network, preserving
+ * the behavior of the old firmware, then allow independent edits in V2. */
+bool fmo_wifi_profiles_migrate(fmo_wifi_profiles_t *out,
+    const fmo_wifi_profiles_v1_t *old, const fmo_endpoint_t *endpoint)
+{
+    if (!out || !old || old->version != 1 || !fmo_endpoint_valid(endpoint)) return false;
+    fmo_wifi_profiles_init(out);
+    out->count = old->count;
+    out->preferred = old->preferred;
+    out->reserved = old->reserved;
+    memcpy(out->entries, old->entries, sizeof(out->entries));
+    if (!fmo_wifi_profiles_valid(out)) { fmo_wifi_profiles_init(out); return false; }
+    for (unsigned i = 0; i < out->count; ++i) out->endpoints[i] = *endpoint;
+    return true;
 }

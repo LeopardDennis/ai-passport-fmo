@@ -74,6 +74,7 @@ static void verify_dates(lv_display_t *display, const char *first, const char *l
 
 static char drawn_path[64], drawn_place[FMO_LOCATION_MAX + 4];
 static lv_area_t drawn_place_area;
+static int drawn_place_offset;
 static void observe_path_draw(lv_event_t *event)
 {
     lv_draw_task_t *task = lv_event_get_draw_task(event);
@@ -86,10 +87,12 @@ static void observe_path_draw(lv_event_t *event)
     lv_text_get_size(&size,dsc->text,dsc->font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
     lv_area_t area;
     lv_draw_task_get_area(task, &area);
-    assert(area.x1 + size.x <= 228);
+    if (!place) assert(area.x1 + size.x <= 228);
     if (place) {
         assert(area.x1 == 12);
         drawn_place_area = area;
+        drawn_place_offset = dsc->ofs_x;
+        assert(dsc->flag & LV_TEXT_FLAG_EXPAND);
         snprintf(drawn_place,sizeof(drawn_place),"%s",dsc->text);
     } else {
         assert(drawn_place[0]);
@@ -112,6 +115,11 @@ static const char *read_path(lv_display_t *display)
 {
     lv_obj_t *panel = lv_obj_get_parent(find_text(lv_screen_active(),"QSO"));
     lv_obj_t *screen = lv_obj_get_parent(panel);
+    // Observer flags change LVGL's text-size path. Production drawing must match.
+    lv_obj_invalidate(screen);
+    lv_refr_now(display);
+    uint16_t production_row[240*16];
+    memcpy(production_row,pixels+150*240,sizeof(production_row));
     drawn_path[0] = drawn_place[0] = 0;
     lv_obj_add_flag(screen,LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
     lv_obj_add_event_cb(screen,observe_path_draw,LV_EVENT_DRAW_TASK_ADDED,NULL);
@@ -120,6 +128,7 @@ static const char *read_path(lv_display_t *display)
     lv_obj_remove_event_cb(screen,observe_path_draw);
     lv_obj_remove_flag(screen,LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
     assert(drawn_path[0]);
+    assert(!memcmp(production_row,pixels+150*240,sizeof(production_row)));
     return drawn_path;
 }
 
@@ -675,6 +684,15 @@ int main(int argc, char **argv)
             snprintf(controls.stations.rows[i].name,48,"%s",names[i]);
         }
         controls.stations.total=162;controls.stations.total_known=true;
+        if (strstr(argv[1],"pinned")) controls.stations.category=FMO_STATION_PINNED;
+        if (strstr(argv[1],"active")) {
+            controls.stations.category=FMO_STATION_ACTIVE;
+            controls.stations.total=21;
+        }
+        if (strstr(argv[1],"_empty")) {
+            controls.stations.status=FMO_STATIONS_EMPTY;
+            controls.stations.count=0;controls.stations.total=0;controls.stations.total_known=true;
+        }
         if (!strcmp(argv[1],"stations_total_unknown")) controls.stations.total_known=false;
         if (!strcmp(argv[1],"stations_total_max")) {
             controls.stations.start=65529;controls.stations.total=65535;
@@ -700,6 +718,11 @@ int main(int argc, char **argv)
             controls.stations.status=FMO_STATIONS_UNKNOWN;
             controls.stations.audio_paused=true;
         }
+    }
+    if (argc > 1 && !strncmp(argv[1],"category",8)) {
+        controls.view=FMO_VIEW_STATION_MENU;
+        controls.selection=!strcmp(argv[1],"category_active") ? 1 : !strcmp(argv[1],"category_all") ? 2 : 0;
+        if (!strcmp(argv[1],"category_busy")) controls.stations.request=FMO_STATION_LIST_WAIT;
     }
     if (argc > 1 && (!strcmp(argv[1], "network") || !strcmp(argv[1], "network_retry") ||
                      !strcmp(argv[1], "network_back"))) {
@@ -775,7 +798,42 @@ int main(int argc, char **argv)
         assert(lv_obj_get_child_count(panel) == 3); /* Only the title and two records are inside. */
         const char *place = find_location_above_qso(panel);
         if (strcmp(argv[1], "location_long")) assert(!strcmp(place, "佛山"));
-        else assert(strstr(place, "...") != NULL);
+        else {
+            char full[FMO_LOCATION_MAX + 4];
+            fmo_location_short_name(state.location,full,sizeof(full));
+            assert(!strcmp(place,full) && !strstr(place,"..."));
+        }
+    }
+    if (argc > 1 && (!strcmp(argv[1],"location_long") || !strcmp(argv[1],"path_long"))) {
+        read_path(display);
+        assert(drawn_place_offset==0);
+        int path_start=drawn_place_area.x2+9;
+        char expected[64];snprintf(expected,sizeof(expected),"%s",drawn_path);
+        uint16_t before[240*16];memcpy(before,pixels+150*240,sizeof(before));
+        fmo_ui_tick(13000);read_path(display);assert(drawn_place_offset==0);
+        fmo_ui_tick(13500);read_path(display);assert(drawn_place_offset<0);
+        int offset=drawn_place_offset;bool moved=false;
+        for(int y=0;y<16;++y) for(int x=0;x<240;++x) {
+            if(x<12 || x>drawn_place_area.x2) assert(before[y*240+x]==pixels[(150+y)*240+x]);
+            else if(before[y*240+x]!=pixels[(150+y)*240+x]) moved=true;
+        }
+        assert(moved && !strcmp(expected,drawn_path) && path_start==drawn_place_area.x2+9);
+        fmo_ui_render(&state,error,ssid,password,82,13500,false,&controls);
+        fmo_ui_tick(14000);read_path(display);assert(drawn_place_offset<offset);
+        lv_point_t size;lv_text_get_size(&size,drawn_place,&fmo_channel_font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        int overflow=size.x-lv_area_get_width(&drawn_place_area);
+        uint64_t travel=((uint64_t)overflow*1000+29)/30;
+        fmo_ui_tick(12000+1000+travel);read_path(display);assert(drawn_place_offset==-overflow);
+        fmo_ui_tick(12000+2*(1000+travel));read_path(display);assert(drawn_place_offset==0);
+        controls.view=FMO_VIEW_NETWORK;
+        fmo_ui_render(&state,"","","",82,20000,false,&controls);lv_refr_now(display);flushes=0;
+        fmo_ui_tick(21000);lv_refr_now(display);assert(flushes==0);
+        controls.view=FMO_VIEW_MONITOR;
+        fmo_ui_render(&state,"","","",82,22000,false,&controls);read_path(display);assert(drawn_place_offset==0);
+        fmo_monitor_state_t short_place=state;strcpy(short_place.location,"佛山市");
+        fmo_ui_render(&short_place,"","","",82,23000,false,&controls);
+        fmo_ui_tick(26000);read_path(display);assert(drawn_place_offset==0 && !strcmp(drawn_place,"佛山"));
+        fmo_ui_render(&state,error,ssid,password,82,12000,false,&controls);
     }
     if (argc > 1 && !strncmp(argv[1], "path", 4)) {
         lv_obj_update_layout(lv_screen_active());
@@ -853,7 +911,7 @@ int main(int argc, char **argv)
             assert(lv_color_eq(lv_obj_get_style_text_color(selected,0),lv_color_hex(0)));
         }
     }
-    const char *overlay_hint = controls.view==FMO_VIEW_NETWORK ? "上/下: 选择 长按确认: 返回" :
+    const char *overlay_hint = (controls.view==FMO_VIEW_NETWORK || controls.view==FMO_VIEW_STATION_MENU) ? "上/下: 选择 长按确认: 返回" :
         controls.view==FMO_VIEW_WIFI ? (controls.wifi.count ? "上/下: 选择 长按确认: 返回" : "长按确认: 返回") :
         controls.view==FMO_VIEW_SETUP ? (controls.setup_info ? "确认: 查看二维码 长按确认: 返回" : "确认: 查看详情 长按确认: 返回") : NULL;
     if(overlay_hint) {
@@ -968,8 +1026,18 @@ int main(int argc, char **argv)
         lv_refr_now(display);
         assert(((lv_label_t *)selected)->offset.x==offset); // Periodic UI updates must not restart scrolling.
     }
-    if (controls.view == FMO_VIEW_STATIONS) {
+    if (controls.view == FMO_VIEW_STATION_MENU) {
         verify("台站列表",0xFF8A00);
+        const char *items[]={"收藏台站","活跃台站","所有台站"};
+        for(unsigned i=0;i<3;++i) verify(items[i],i==controls.selection ? 0x000000 : 0xF4F4F4);
+        verify(controls.stations.request==FMO_STATION_NONE ? "确认: 打开列表" : "正在处理 请稍候",0x929292);
+    }
+    if (controls.view == FMO_VIEW_STATIONS) {
+        if (controls.stations.status==FMO_STATIONS_EMPTY)
+            verify(controls.stations.category==FMO_STATION_PINNED ? "暂无收藏台站" :
+                   controls.stations.category==FMO_STATION_ACTIVE ? "暂无活跃台站" : "暂无台站",0x929292);
+        verify(controls.stations.category == FMO_STATION_PINNED ? "收藏台站" :
+               controls.stations.category == FMO_STATION_ACTIVE ? "活跃台站" : "所有台站",0xFF8A00);
         const char *footer=controls.stations.audio_paused || controls.stations.status==FMO_STATIONS_LOADING ?
             "长按确认: 返回" : controls.stations.status==FMO_STATIONS_LOAD_FAILED || controls.stations.status==FMO_STATIONS_EMPTY ?
             "确认: 重试 长按确认: 返回" : "长按上下翻页 长按确认返回";
@@ -993,6 +1061,10 @@ int main(int argc, char **argv)
             lv_refr_now(display);
             controls.view=FMO_VIEW_SETUP; controls.setup_info=false;
             fmo_ui_render(&state,"","FMO-Setup-TEST","ABCDEF012345",82,12000,false,&controls);
+            lv_refr_now(display);
+            controls.view=FMO_VIEW_STATION_MENU;
+            controls.selection=i%3;
+            fmo_ui_render(&state,"","","",82,12000,false,&controls);
             lv_refr_now(display);
             controls.view=FMO_VIEW_STATIONS;
             fmo_ui_render(&state,"","","",82,12000,false,&controls);

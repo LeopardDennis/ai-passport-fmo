@@ -116,5 +116,5 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix='fmo-wifi-select-') as tmp:
     file=Path(tmp)/'test.c';file.write_text(preamble+functions+tests)
     binary=Path(tmp)/'test'
-    subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror','-I'+str(ROOT/'main'),str(file),str(ROOT/'main/fmo_wifi_profiles.c'),str(ROOT/'main/fmo_credentials.c'),'-o',str(binary)],check=True)
+    subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror','-I'+str(ROOT/'main'),str(file),str(ROOT/'main/fmo_wifi_profiles.c'),str(ROOT/'main/fmo_credentials.c'),str(ROOT/'main/fmo_endpoint.c'),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)

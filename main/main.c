@@ -101,7 +101,7 @@ static void apply_input(const app_input_t *input)
         fmo_audio_set_volume(s_controls.audio_enabled ? s_controls.volume : 0);
         break;
     case FMO_ACTION_STATIONS:
-        if (fmo_network_request_stations(s_controls.stations.start)) {
+        if (fmo_network_request_stations(s_controls.stations.category, s_controls.stations.start)) {
             s_controls.stations.status = FMO_STATIONS_LOADING;
             s_controls.stations.request = FMO_STATION_LIST_QUEUED;
         } else s_controls.stations.status = FMO_STATIONS_LOAD_FAILED;
@@ -183,9 +183,13 @@ static void ui_tick(lv_timer_t *timer)
         }
         s_state = snapshot.state;
         memcpy(s_controls.connected_ssid, snapshot.connected_ssid, sizeof(s_controls.connected_ssid));
-        bool switched = snapshot.stations.status == FMO_STATIONS_SUCCESS &&
+        /* A failed nonblocking request may leave an older category snapshot in
+         * the queue. Never render its rows under the newly selected title. */
+        bool matching_category = s_controls.view != FMO_VIEW_STATIONS ||
+            snapshot.stations.category == s_controls.stations.category;
+        bool switched = matching_category && snapshot.stations.status == FMO_STATIONS_SUCCESS &&
                         s_controls.stations.status != FMO_STATIONS_SUCCESS;
-        s_controls.stations = snapshot.stations;
+        if (matching_category) s_controls.stations = snapshot.stations;
         if (switched) {
             s_hint_until_ms = monotonic_ms() + 3000;
             if (s_controls.view == FMO_VIEW_STATIONS) s_controls.view = FMO_VIEW_MONITOR;
@@ -228,8 +232,11 @@ static void ui_tick(lv_timer_t *timer)
 static void audio_meter_tick(lv_timer_t *timer)
 {
     (void)timer;
-    if (!atomic_load(&s_display_dark))
-        fmo_ui_set_audio_level(fmo_audio_get_level(), monotonic_ms());
+    if (!atomic_load(&s_display_dark)) {
+        uint64_t now = monotonic_ms();
+        fmo_ui_set_audio_level(fmo_audio_get_level(), now);
+        fmo_ui_tick(now);
+    }
 }
 
 static void build_ui(void)

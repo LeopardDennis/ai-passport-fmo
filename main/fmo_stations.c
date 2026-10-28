@@ -1,10 +1,30 @@
 #include "fmo_stations.h"
 #include <string.h>
 
-bool fmo_stations_load(fmo_stations_t *s, uint32_t start, uint64_t now)
+const char *fmo_stations_query_name(fmo_station_category_t category)
 {
-    if (s->request != FMO_STATION_NONE || start > UINT32_MAX - FMO_STATION_PAGE_SIZE - 1)
+    static const char *const names[] = {"getListRange", "getPinnedList", "getActiveList"};
+    return (unsigned)category < FMO_STATION_CATEGORY_COUNT ? names[category] : NULL;
+}
+
+fmo_station_category_t fmo_stations_response_category(const char *subtype)
+{
+    static const char *const names[] = {"getListResponse", "getPinnedListResponse", "getActiveListResponse"};
+    if (subtype) for (unsigned i = 0; i < FMO_STATION_CATEGORY_COUNT; ++i)
+        if (!strcmp(subtype, names[i])) return (fmo_station_category_t)i;
+    return FMO_STATION_CATEGORY_COUNT;
+}
+
+bool fmo_stations_load(fmo_stations_t *s, fmo_station_category_t category, uint32_t start, uint64_t now)
+{
+    if ((unsigned)category >= FMO_STATION_CATEGORY_COUNT ||
+        s->request != FMO_STATION_NONE || start > UINT32_MAX - FMO_STATION_PAGE_SIZE - 1)
         return false;
+    if (category != s->category || !start) {
+        s->total_known = false;
+        s->total = 0;
+    }
+    s->category = category;
     s->counting = false;
     s->start = start;
     s->count = 0;

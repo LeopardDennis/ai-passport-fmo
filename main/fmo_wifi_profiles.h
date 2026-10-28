@@ -1,4 +1,5 @@
 #pragma once
+#include "fmo_endpoint.h"
 #include <stdbool.h>
 #include <stdint.h>
 #define FMO_WIFI_PROFILE_MAX 5
@@ -11,7 +12,15 @@ typedef struct {
     uint8_t preferred;
     uint8_t reserved;
     fmo_wifi_credential_t entries[FMO_WIFI_PROFILE_MAX];
+} fmo_wifi_profiles_v1_t;
+typedef struct {
+    uint8_t version, count, preferred, reserved;
+    fmo_wifi_credential_t entries[FMO_WIFI_PROFILE_MAX];
+    /* Empty endpoint means the firmware default. Persisted with credentials. */
+    fmo_endpoint_t endpoints[FMO_WIFI_PROFILE_MAX];
 } fmo_wifi_profiles_t;
+bool fmo_wifi_profiles_migrate(fmo_wifi_profiles_t *out,
+    const fmo_wifi_profiles_v1_t *old, const fmo_endpoint_t *endpoint);
 bool fmo_wifi_profiles_valid(const fmo_wifi_profiles_t *profiles);
 void fmo_wifi_profiles_init(fmo_wifi_profiles_t *profiles);
 int fmo_wifi_profiles_find(const fmo_wifi_profiles_t *profiles, const char *ssid);

@@ -28,5 +28,6 @@ void fmo_provision_note_disconnect_reason(uint8_t reason);
 esp_err_t fmo_provision_run(EventGroupHandle_t bits, EventBits_t ready,
                             fmo_setup_display_t display);
 
-/* Saved LAN target takes precedence over compile-time defaults. */
+/* Associated Wi-Fi target takes precedence over compile-time defaults.
+ * Worker only: locks the profile snapshot; never performs NVS I/O. */
 void fmo_provision_get_endpoint(fmo_endpoint_t *endpoint);

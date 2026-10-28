@@ -3,13 +3,14 @@
 #include "fmo_stations.h"
 #include <stdint.h>
 #include "fmo_wifi_profiles.h"
-typedef enum { FMO_VIEW_MONITOR, FMO_VIEW_NETWORK, FMO_VIEW_SETUP, FMO_VIEW_STATIONS, FMO_VIEW_WIFI } fmo_view_t;
+typedef enum { FMO_VIEW_MONITOR, FMO_VIEW_NETWORK, FMO_VIEW_SETUP, FMO_VIEW_STATIONS, FMO_VIEW_STATION_MENU, FMO_VIEW_WIFI } fmo_view_t;
 typedef enum { FMO_KEY_UP, FMO_KEY_DOWN, FMO_KEY_OK, FMO_KEY_BACK, FMO_KEY_PAGE_UP, FMO_KEY_PAGE_DOWN } fmo_key_t;
 typedef enum { FMO_ACTION_NONE, FMO_ACTION_VOLUME, FMO_ACTION_AUDIO,
     FMO_ACTION_STATIONS, FMO_ACTION_STATION_SWITCH, FMO_ACTION_SETUP, FMO_ACTION_RETRY, FMO_ACTION_CANCEL } fmo_action_t;
 typedef struct {
     fmo_view_t view;
     unsigned selection;
+    unsigned station_menu_selection; // RAM-only: pinned, active, all.
     fmo_wifi_list_t wifi;
     char connected_ssid[33];
     bool setup_info;

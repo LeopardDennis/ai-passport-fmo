@@ -12,7 +12,10 @@ int main(void)
     c.volume=95; fmo_controls_key(&c,FMO_KEY_UP); assert(c.volume==100);
     c.volume=5; fmo_controls_key(&c,FMO_KEY_DOWN); assert(c.volume==0);
     c.volume=50;
+    assert(fmo_controls_key(&c, FMO_KEY_OK) == FMO_ACTION_NONE);
+    assert(c.view == FMO_VIEW_STATION_MENU && c.selection == 0);
     assert(fmo_controls_key(&c, FMO_KEY_OK) == FMO_ACTION_STATIONS);
+    assert(c.stations.category == FMO_STATION_PINNED);
     assert(c.audio_enabled && c.volume == 50);
     assert(c.view == FMO_VIEW_STATIONS && c.selection == 0);
     c.stations.count = 6; c.stations.has_next = true; c.stations.status = FMO_STATIONS_READY;
@@ -34,6 +37,24 @@ int main(void)
     assert(fmo_controls_key(&c,FMO_KEY_DOWN)==FMO_ACTION_NONE);
     assert(fmo_controls_key(&c,FMO_KEY_PAGE_DOWN)==FMO_ACTION_NONE && c.stations.start==0);
     assert(fmo_controls_key(&c,FMO_KEY_PAGE_UP)==FMO_ACTION_NONE && c.selection==2);
+    assert(fmo_controls_key(&c,FMO_KEY_BACK)==FMO_ACTION_NONE && c.view==FMO_VIEW_STATION_MENU);
+    assert(fmo_controls_key(&c,FMO_KEY_DOWN)==FMO_ACTION_NONE && c.selection==1);
+    assert(fmo_controls_key(&c,FMO_KEY_OK)==FMO_ACTION_NONE); // In-flight switch owns the socket.
+    c.stations.request=FMO_STATION_NONE;
+    assert(fmo_controls_key(&c,FMO_KEY_OK)==FMO_ACTION_STATIONS);
+    assert(c.stations.category==FMO_STATION_ACTIVE && !c.stations.count && !c.stations.total_known);
+    fmo_controls_key(&c,FMO_KEY_BACK);
+    assert(c.selection==1);
+    fmo_controls_key(&c,FMO_KEY_DOWN);
+    assert(fmo_controls_key(&c,FMO_KEY_OK)==FMO_ACTION_STATIONS && c.stations.category==FMO_STATION_ALL);
+    fmo_controls_key(&c,FMO_KEY_BACK);
+    assert(c.selection==2);
+    fmo_controls_key(&c,FMO_KEY_BACK);
+    assert(c.view==FMO_VIEW_MONITOR);
+    fmo_controls_key(&c,FMO_KEY_OK);
+    assert(c.view==FMO_VIEW_STATION_MENU && c.selection==2); // Remember until reboot.
+    fmo_controls_key(&c,FMO_KEY_DOWN); assert(c.selection==0);
+    fmo_controls_key(&c,FMO_KEY_UP); assert(c.selection==2);
     assert(fmo_controls_key(&c,FMO_KEY_BACK)==FMO_ACTION_NONE && c.view==FMO_VIEW_MONITOR);
     assert(fmo_controls_key(&c, FMO_KEY_BACK) == FMO_ACTION_NONE);
     assert(c.view == FMO_VIEW_NETWORK && c.selection == 0);

@@ -14,31 +14,36 @@ const prefix = [...first.matchAll(/^"(?:[^"\\]|\\.)*"/gm)].map(m => JSON.parse(m
 const script = (prefix + 'test-token' + literal('page_end')).match(/<script>([\s\S]*?)<\/script>/)[1];
 function element() { return {value:'',textContent:'',disabled:false,children:[],append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}; }
 const nodes = Object.fromEntries(['form','ssid','pass','net','save','result','saved','finish','host','port','fmoform','fmosave','fmotest'].map(k => [k,element()]));
+let targets={host:'fmo.local',port:80,ssid:'Home',networks:[{ssid:'Home',host:'home.local',port:8080},{ssid:'Office',host:'office.local',port:9090}]};
 let names = ['<img src=x onerror=alert(1)>','Home'], status = 6, sent;
 const context = vm.createContext({document:{getElementById:id=>nodes[id],createElement:element},confirm:()=>true,setTimeout:()=>{},fetch:async(url,options)=>{
   if(options?.method==='POST')sent={...options,url};
-  return {ok:true,json:async()=>url==='/saved'?names:url==='/networks'?[]:url==='/fmo'?{host:'fmo.local',port:80}:status};
+  return {ok:true,json:async()=>url==='/saved'?names:url==='/networks'?[]:url==='/fmo'?targets:status};
 }});
 const flush = async()=>{for(let i=0;i<15;i++)await Promise.resolve()};
 (async()=>{
   vm.runInContext(script,context);await flush();
   assert.equal(nodes.saved.children[0].children[0].textContent,names[0]);
   assert.equal(nodes.finish.disabled,false);
+  assert.equal(nodes.ssid.value,'Home');assert.equal(nodes.host.value,'home.local');assert.equal(nodes.port.value,8080);
+  nodes.net.value='Office';nodes.net.onchange();assert.equal(nodes.host.value,'office.local');assert.equal(nodes.port.value,9090);
+  nodes.ssid.value='New';nodes.ssid.onchange();assert.equal(nodes.host.value,'fmo.local');assert.equal(nodes.port.value,80);
+  nodes.ssid.value='Home';nodes.ssid.onchange();
   nodes.saved.children[0].children[1].onclick();await flush();
   assert.deepEqual(JSON.parse(sent.body),{ssid:names[0],password:'',remove:true});
   assert.equal(sent.headers['X-Setup-Token'],'test-token');
   assert.match(nodes.result.textContent,/已满 5 组/);
   nodes.finish.onclick();await flush();
-  assert.equal(JSON.parse(sent.body).finish,true);
+  assert.equal(JSON.parse(sent.body).finish,true);assert.equal(JSON.parse(sent.body).ssid,'Home');
   names=[];status=5;await vm.runInContext('poll()',context);await flush();
   assert.equal(nodes.saved.children.length,0);assert.equal(nodes.finish.disabled,true);
   status=3;nodes.pass.value='secret';await vm.runInContext('poll()',context);
   assert.equal(nodes.pass.value,'');
-  assert.equal(nodes.host.value,'fmo.local');
+  assert.equal(nodes.host.value,'home.local');
   nodes.host.value='192.168.1.2';nodes.port.value='8080';
-  status=11;nodes.fmoform.onsubmit({preventDefault(){}});await flush();
+  status=11;nodes.fmosave.onclick();await flush();
   assert.equal(sent.url,'/fmo');
-  assert.deepEqual(JSON.parse(sent.body),{host:'192.168.1.2',port:8080,probe:false});
+  assert.deepEqual(JSON.parse(sent.body),{ssid:'Home',host:'192.168.1.2',port:8080,probe:false});
   assert.equal(sent.headers['X-Setup-Token'],'test-token');
   assert.match(nodes.result.textContent,/地址已保存/);
   status=13;nodes.fmotest.onclick();await flush();
@@ -52,5 +57,10 @@ const flush = async()=>{for(let i=0;i<15;i++)await Promise.resolve()};
     assert.match(nodes.result.textContent,expected);
     assert.equal(nodes.save.disabled,false);
   }
+  status=6;nodes.ssid.value='New';nodes.ssid.onchange();nodes.pass.value='new-secret';nodes.host.value='new.local';nodes.port.value=1234;
+  nodes.form.onsubmit({preventDefault(){}});await flush();
+  assert.equal(sent.url,'/configure');assert.deepEqual(JSON.parse(sent.body),{ssid:'New',password:'new-secret',host:'new.local',port:1234});
+  nodes.fmosave.onclick();assert.match(nodes.result.textContent,/尚未保存/);
+  nodes.ssid.value='Office';nodes.ssid.onchange();assert.equal(nodes.host.value,'office.local');assert.equal(nodes.pass.value,'');
   console.log('Provisioning page: PASS (safe SSID text, deletion, finish, capacity, password clearing)');
 })().catch(e=>{console.error(e);process.exitCode=1});

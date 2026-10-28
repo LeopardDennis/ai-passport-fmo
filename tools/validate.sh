@@ -80,7 +80,7 @@ run_static_checks() {
         tests/test_fmo_credentials.c main/fmo_credentials.c -o "${test_dir}/test_fmo_credentials"
     "${test_dir}/test_fmo_credentials"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_fmo_wifi_profiles.c main/fmo_wifi_profiles.c main/fmo_credentials.c \
+        tests/test_fmo_wifi_profiles.c main/fmo_wifi_profiles.c main/fmo_credentials.c main/fmo_endpoint.c \
         -o "${test_dir}/test_fmo_wifi_profiles"
     "${test_dir}/test_fmo_wifi_profiles"
     node tests/test_fmo_provision_page.cjs

@@ -7,6 +7,13 @@
 #define FMO_STATION_COUNT_BUDGET_MS 3000
 #define FMO_STATION_COUNT_LIMIT 65535
 
+typedef enum {
+    FMO_STATION_ALL, FMO_STATION_PINNED, FMO_STATION_ACTIVE,
+    FMO_STATION_CATEGORY_COUNT
+} fmo_station_category_t;
+const char *fmo_stations_query_name(fmo_station_category_t category);
+fmo_station_category_t fmo_stations_response_category(const char *subtype);
+
 typedef struct { uint32_t uid; char name[48]; } fmo_station_t;
 typedef enum {
     FMO_STATIONS_IDLE, FMO_STATIONS_LOADING, FMO_STATIONS_READY,
@@ -19,6 +26,7 @@ typedef enum {
     FMO_STATION_VERIFY, FMO_STATION_RECONCILE
 } fmo_station_request_t;
 typedef struct {
+    fmo_station_category_t category;
     fmo_station_t rows[FMO_STATION_PAGE_SIZE];
     uint32_t start, target_uid;
     unsigned count;
@@ -32,7 +40,7 @@ typedef struct {
     uint64_t started_ms;
 } fmo_stations_t;
 
-bool fmo_stations_load(fmo_stations_t *s, uint32_t start, uint64_t now);
+bool fmo_stations_load(fmo_stations_t *s, fmo_station_category_t category, uint32_t start, uint64_t now);
 /* Count with bounded one-row range probes before loading the requested page. */
 void fmo_stations_begin_count(fmo_stations_t *s, uint64_t now);
 void fmo_stations_prepare_query(fmo_stations_t *s, uint64_t now);

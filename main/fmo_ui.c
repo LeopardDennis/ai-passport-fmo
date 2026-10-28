@@ -4,6 +4,7 @@
 #include "fmo_wifi_qr.h"
 #include "fmo_wifi_font.h"
 #include "src/misc/lv_text_private.h"
+#include "src/misc/lv_area_private.h"
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
@@ -50,6 +51,8 @@ static char path_text[64], location_text[FMO_LOCATION_MAX + 4];
 static bool path_cache_valid, path_ready;
 static fmo_position_t path_origin, path_target;
 static int path_left;
+static int location_offset, location_overflow;
+static uint64_t location_scroll_started;
 static char qso_times[FMO_HISTORY_COUNT][20];
 static int64_t qso_stamps[FMO_HISTORY_COUNT];
 static bool qso_present[FMO_HISTORY_COUNT];
@@ -232,7 +235,9 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
             lv_draw_buf_create(128, 128, LV_COLOR_FORMAT_I1, LV_STRIDE_AUTO) : NULL;
         overlay = rect(lv_screen_active(), 0, 40, 240, 280, BLACK);
         if (view == FMO_VIEW_STATIONS) {
-            lv_obj_t *title = label(overlay, 12, 10, 80, &fmo_channel_font, ORANGE, "台站列表");
+            lv_obj_t *title = label(overlay, 12, 10, 80, &fmo_channel_font, ORANGE,
+                controls->stations.category == FMO_STATION_PINNED ? "收藏台站" :
+                controls->stations.category == FMO_STATION_ACTIVE ? "活跃台站" : "所有台站");
             center_ink(title, 10, 20, 'H');
             station_page = label(overlay, 96, 10, 132, &lv_font_montserrat_14, MUTED, "");
             lv_obj_set_style_text_align(station_page, LV_TEXT_ALIGN_RIGHT, 0);
@@ -249,10 +254,13 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
             station_badge = label(overlay, 204, 64, 16, &lv_font_montserrat_14, ORANGE, LV_SYMBOL_OK);
             station_footer = label(overlay, 12, FOOTER_TOP - 40, 216, fmo_wifi_font(), MUTED, "");
             lv_obj_set_style_text_align(station_footer, LV_TEXT_ALIGN_CENTER, 0);
-        } else if (view == FMO_VIEW_NETWORK) {
-            label(overlay, 12, 10, 216, &fmo_channel_font, ORANGE, "网络设置");
+        } else if (view == FMO_VIEW_NETWORK || view == FMO_VIEW_STATION_MENU) {
+            label(overlay, 12, 10, 216, &fmo_channel_font, ORANGE,
+                  view == FMO_VIEW_STATION_MENU ? "台站列表" : "网络设置");
             menu_status = label(overlay, 12, 52, 216, &fmo_channel_font, MUTED, "");
-            const char *items[] = {"Wi-Fi 配网", "选择 Wi-Fi", "返回"};
+            const char *network_items[] = {"Wi-Fi 配网", "选择 Wi-Fi", "返回"};
+            const char *station_items[] = {"收藏台站", "活跃台站", "所有台站"};
+            const char *const *items = view == FMO_VIEW_STATION_MENU ? station_items : network_items;
             for (unsigned i = 0; i < 3; ++i) {
                 menu_rows[i] = rect(overlay, 12, 96 + 44 * i, 216, 36, LINE);
                 menu_labels[i] = label(menu_rows[i], 8, 6, 200, &fmo_channel_font, WHITE, items[i]);
@@ -360,8 +368,10 @@ static void overlay_render(const fmo_controls_t *controls, bool connected,
             }
         }
     }
-    if (view == FMO_VIEW_NETWORK) {
-        text(menu_status, controls->hotspot_active ? "配网热点已开启" :
+    if (view == FMO_VIEW_NETWORK || view == FMO_VIEW_STATION_MENU) {
+        if (view == FMO_VIEW_STATION_MENU)
+            text(menu_status, controls->stations.request != FMO_STATION_NONE ? "正在处理 请稍候" : "确认: 打开列表");
+        else text(menu_status, controls->hotspot_active ? "配网热点已开启" :
              connected ? "Wi-Fi 已连接" : "Wi-Fi 未连接");
         for (unsigned i = 0; i < 3; ++i) {
             lv_color_t fill = lv_color_hex(i == controls->selection ? ORANGE : LINE);
@@ -397,7 +407,10 @@ static void render_stations(const fmo_controls_t *controls, const fmo_monitor_st
         status = !state->wifi_connected ? "Wi-Fi未连接" :
             !state->control_connected ? "FMO未连接" : "读取失败";
         break;
-    case FMO_STATIONS_EMPTY: status = "暂无台站"; break;
+    case FMO_STATIONS_EMPTY:
+        status = s->category == FMO_STATION_PINNED ? "暂无收藏台站" :
+                 s->category == FMO_STATION_ACTIVE ? "暂无活跃台站" : "暂无台站";
+        break;
     case FMO_STATIONS_SWITCHING: status = "正在切换台站"; break;
     case FMO_STATIONS_FAILED: status = s->audio_paused ? "切换失败 正在确认" : "切换失败"; break;
     case FMO_STATIONS_UNKNOWN: status = s->audio_paused ? "结果待确认 请稍候" : "未确认切换"; break;
@@ -534,6 +547,31 @@ void fmo_ui_set_audio_level(uint8_t level, uint64_t now_ms)
     audio_bar_width = width;
 }
 
+/* Reuse the application's 50 ms LVGL timer, without a new timer or widget.
+ * Only the place viewport is invalidated; bearing and distance stay fixed. */
+void fmo_ui_tick(uint64_t now_ms)
+{
+    if (!monitor_content || location_overflow <= 0) return;
+    const uint64_t pause = 1000;
+    uint64_t travel = ((uint64_t)location_overflow * 1000 + 29) / 30;
+    uint64_t elapsed = now_ms >= location_scroll_started ? now_ms - location_scroll_started : 0;
+    uint64_t phase = elapsed % (2 * (pause + travel));
+    int offset;
+    if (phase < pause) offset = 0;
+    else if (phase < pause + travel) offset = (int)((phase - pause) * location_overflow / travel);
+    else if (phase < 2 * pause + travel) offset = location_overflow;
+    else offset = location_overflow - (int)((phase - 2 * pause - travel) * location_overflow / travel);
+    if (offset == location_offset) return;
+    location_offset = offset;
+    lv_area_t area;
+    lv_obj_get_coords(monitor_content, &area);
+    area.x2 = area.x1 + path_left - 9;
+    area.x1 += 12;
+    area.y1 += LOCATION_TOP;
+    area.y2 = area.y1 + LOCATION_HEIGHT - 1;
+    lv_obj_invalidate_area(monitor_content, &area);
+}
+
 /* Dates are fixed text without scrolling. Draw them in the panel instead of
  * allocating extra date labels, preserving the 24 KiB LVGL redraw headroom. */
 static void draw_qso_times(lv_event_t *event)
@@ -629,7 +667,19 @@ static void draw_path(lv_event_t *event)
         dsc.color = lv_color_hex(MUTED);
         dsc.text = value;
         dsc.text_local = true;
-        lv_draw_label(lv_event_get_layer(event), &dsc, &area);
+        dsc.flag = LV_TEXT_FLAG_EXPAND; /* One line, even when the full name is wider. */
+        lv_text_get_size(&dsc.text_size, value, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        dsc.ofs_x = part ? 0 : -location_offset;
+        lv_layer_t *layer = lv_event_get_layer(event);
+        lv_area_t original_clip = layer->_clip_area, clip;
+        lv_area_t viewport = area;
+        viewport.y1 = bounds.y1 + LOCATION_TOP;
+        viewport.y2 = viewport.y1 + LOCATION_HEIGHT - 1;
+        if (lv_area_intersect(&clip, &viewport, &original_clip)) {
+            layer->_clip_area = clip;
+            lv_draw_label(layer, &dsc, &area);
+            layer->_clip_area = original_clip;
+        }
     }
 }
 
@@ -640,6 +690,8 @@ static void create_monitor(void)
     callsign_layout_valid = false;
     path_cache_valid = false;
     path_left = 12;
+    location_offset = location_overflow = 0;
+    location_scroll_started = 0;
     memset(qso_stamps, 0, sizeof(qso_stamps));
     memset(qso_present, 0, sizeof(qso_present));
     lv_obj_t *screen = rect(lv_screen_active(), 0, 0, 240, 320, BLACK);
@@ -775,19 +827,17 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
     lv_text_get_size(&place_size, compact, &fmo_channel_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     lv_text_get_size(&path_size, path_text, &lv_font_montserrat_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     int available = 216 - path_size.x - 8;
-    /* Keep bearing/distance complete and shorten only at UTF-8 boundaries. */
-    if (place_size.x > available) {
-        size_t length = strlen(compact);
-        do {
-            do { --length; } while (length && ((unsigned char)compact[length] & 0xc0) == 0x80);
-            memcpy(compact + length, "...", 4);
-            lv_text_get_size(&place_size, compact, &fmo_channel_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        } while (length && place_size.x > available);
-    }
-    int next_path_left = 12 + place_size.x + 8;
+    /* Reserve the complete bearing/distance. Long names scroll in the remaining
+     * viewport; unchanged network snapshots must not restart the animation. */
+    if (available < 1) available = 1;
+    int place_width = place_size.x > available ? available : place_size.x;
+    int next_path_left = 12 + place_width + 8;
     if (strcmp(location_text, compact) || path_left != next_path_left) {
         snprintf(location_text, sizeof(location_text), "%s", compact);
         path_left = next_path_left;
+        location_overflow = place_size.x - place_width;
+        location_offset = 0;
+        location_scroll_started = now_ms;
         lv_obj_invalidate(monitor_content);
     }
     bool grid_changed = text(grid_label, grid);

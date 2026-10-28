@@ -36,7 +36,10 @@ without its city suffix. Place names include city plus district/county when
 available, with the city first. The cache format is versioned so older
 single-region labels are refreshed.
 The original geocoder/cache value is retained. The 216 px row reserves room for
-the complete bearing and distance; only the place name ends in dots if needed.
+the complete bearing and distance. Overflowing place names scroll back and forth
+at 30 pixels per second, with a one-second pause at both ends; bearing and distance
+stay fixed. Short names remain still. Scrolling pauses while the display sleeps
+and stops on menu pages. Unchanged snapshots do not restart it.
 Missing or pending place names show `--`. The place belongs to the live/last
 speaker, independently of the two history records. The callsign keeps its
 fixed 32 px size and scrolls if needed.
@@ -245,12 +248,18 @@ credentials on failure. On success, the hotspot and HTTP server shut down and
 the monitor connects to the saved FMO target (default `fmo.local:80`, using mDNS resolution). Keep both devices on
 a LAN that allows multicast and communication between clients.
 
-The setup page's **FMO address** form saves a hostname or IPv4 address and port,
-with `fmo.local:80` as the default. Saved values override build-time settings and
-take effect after setup finishes, without rebuilding. **Check port** uses a saved
-Wi-Fi profile to check DNS resolution and TCP reachability. Save a Wi-Fi profile
+Each saved Wi-Fi profile includes its own **FMO address** (hostname or IPv4) and
+port, defaulting to `fmo.local:80`. **Connect and save Wi-Fi and FMO address** saves
+both together after Wi-Fi/DHCP succeeds. Selecting a saved network on the setup
+page restores its address; **Update only the saved network's FMO address** edits
+that destination without entering the password again. Rebooting or switching
+Wi-Fi restores the associated destination for events, control and audio. When legacy NVS data is present, existing
+profiles inherit the former global destination during migration; new networks
+use the build-time default. **Check port** connects to the selected saved Wi-Fi
+profile to check DNS resolution and TCP reachability. Save a Wi-Fi profile
 first, then re-enter setup to check it. A reachable port does not prove WebSocket
 path or event compatibility; the monitor screen reports the final FMO status.
+The existing fresh-install reset still clears application settings when flashing a new firmware image.
 A check neither saves new Wi-Fi credentials nor changes the saved FMO address.
 
 Network/setup startup failures retain the worker and retry every five seconds;
@@ -324,10 +333,23 @@ and cannot reliably identify a reinstall of the same binary.
 
 - **UP**: increase conversation volume by 10%, up to 100%.
 - **DOWN**: decrease conversation volume by 10%, down to 0%.
-- **Main-screen OK**: open the station list.
+- **Main-screen OK**: open the station category menu (favorites, active, all).
 - **Main-screen long OK**: open the network menu for Wi-Fi setup; UP/DOWN selects, click OK executes, long OK returns from subpages.
 - **Main-screen long UP**: no shortcut. Holding UP for five seconds at boot still enters Recovery.
 - **Setup click OK**: switch QR/credentials; UP/DOWN or long OK cancels to the network menu.
+
+Choose favorites, active, or all with UP/DOWN and confirm to open its list. The
+last opened category is remembered until reboot; favorites is selected initially.
+Long OK returns from the list to categories, then from categories to monitoring.
+Each entry reloads the first page. Favorites come from the connected FMO's
+`station/getPinnedList`; active stations come from `station/getActiveList`, using
+FMO's own activity definition and ordering. Both accept `start`/`count` and return
+`uid`/`name` rows. Favorites are managed on FMO. Requests are serialized; a pending
+request must finish or time out before another category can open, and replies
+for other categories are ignored. Empty categories have distinct messages;
+errors or unsupported/unanswered requests show a read failure with retry, never
+an empty list. Browsing does not automatically reorder the displayed page;
+a later page query may reflect changes in the remote list.
 
 The station list uses the existing font, palette and single-line gray footer.
 UP/DOWN selects among six rows and loads the adjacent page at the boundary.
@@ -337,13 +359,14 @@ the current station appears in the summary and has a right-side check mark in th
 The upper-right indicator shows the selected station index/total, for example
 `1/162`, `2/162`, or `3/162`, and follows selection across pages. It shows
 `1/--` when the total is unavailable. Opening or returning to the first page
-refreshes the total with one-row range probes; other pages reuse it. Counting
+refreshes the total for all three categories with one-row range probes; other pages reuse it.
+A conflicting page response invalidates or corrects a changed total. Counting
 is limited to 32 probes and stops starting probes after three seconds, then
 loads the ordinary page. The existing ten-second response timeout still applies.
 Loading remains cancellable with long OK and playback continues. Selected long
 names scroll; matching names on a page include their UIDs. Click OK to switch
 immediately, without a confirmation page. Selecting the current station only
-returns to monitoring with a hint. Long OK returns without cancelling a sent
+returns to monitoring with a hint. Long OK returns to categories without cancelling a sent
 command. Browsing preserves playback; counting and page requests share the
 control connection serially, then channel polling resumes.
 
@@ -355,7 +378,7 @@ disconnection or a ten-second response timeout, the firmware queries the actual
 station without resending the switch. Audio remains paused while that result is
 unresolved; long OK still returns so network setup remains accessible. There are
 only six cached rows plus one transient lookahead row. This requires compatible
-FMO `getListRange`, `setCurrent` and `getCurrent` station APIs; physical switching,
+FMO `getListRange`, `getPinnedList`, `getActiveList`, `setCurrent` and `getCurrent` station APIs; physical switching,
 continuity and memory/stack margins under live traffic require device validation.
 
 

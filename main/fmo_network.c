@@ -251,7 +251,7 @@ static void parse_fmo_history(const cJSON *data)
 
 /* Range count semantics differ between servers. Request one lookahead row;
  * retain six and derive the next-page flag from the actual array length. */
-static void parse_station_list(const cJSON *data)
+static void parse_station_list(fmo_station_category_t category, const cJSON *data)
 {
     const cJSON *list = cJSON_GetObjectItemCaseSensitive(data, "list");
     unsigned count = cJSON_IsArray(list) ? (unsigned)cJSON_GetArraySize(list) : UINT32_MAX;
@@ -270,6 +270,11 @@ static void parse_station_list(const cJSON *data)
         for (unsigned j = 0; j < i; ++j) if (rows[j].uid == rows[i].uid) valid = false;
     }
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if (s_snapshot.stations.category != category ||
+        s_snapshot.stations.request != FMO_STATION_LIST_WAIT) {
+        xSemaphoreGive(s_state_lock);
+        return; /* A different category or unsolicited reply cannot own this page. */
+    }
     fmo_stations_list(&s_snapshot.stations, valid ? rows : NULL, count);
     xQueueOverwrite(s_update_queue, &s_snapshot);
     xSemaphoreGive(s_state_lock);
@@ -316,6 +321,16 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
         cJSON_Delete(root);
         return;
     }
+    if (kind == FMO_SOCKET_CONTROL && !strcmp(type->valuestring, "station")) {
+        fmo_station_category_t category = fmo_stations_response_category(sub_type->valuestring);
+        if (category != FMO_STATION_CATEGORY_COUNT) {
+            const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+            bool failed = code && (!cJSON_IsNumber(code) || code->valuedouble != 0);
+            parse_station_list(category, failed || fmo_text_json_has_nul(payload) ? NULL : data);
+            cJSON_Delete(root);
+            return;
+        }
+    }
     if (kind == FMO_SOCKET_CONTROL && !strcmp(type->valuestring, "config") &&
         !strcmp(sub_type->valuestring, "getCordinateResponse")) {
         parse_local_position(data, fmo_text_json_has_nul(payload));
@@ -344,8 +359,7 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
     }
 
     if (kind == FMO_SOCKET_CONTROL && !strcmp(type->valuestring, "station")) {
-        if (!strcmp(sub_type->valuestring, "getListResponse")) parse_station_list(data);
-        else if (!strcmp(sub_type->valuestring, "setCurrentResponse")) {
+        if (!strcmp(sub_type->valuestring, "setCurrentResponse")) {
             const cJSON *result = cJSON_GetObjectItemCaseSensitive(data, "result");
             if (cJSON_IsNumber(result) && result->valuedouble == result->valueint) {
                 xSemaphoreTake(s_state_lock, portMAX_DELAY);
@@ -546,7 +560,8 @@ static bool request_station_control(void)
     if (phase == FMO_STATION_LIST_QUEUED) {
         fmo_stations_prepare_query(stations, now_ms());
         length = snprintf(request, sizeof(request),
-            "{\"type\":\"station\",\"subType\":\"getListRange\",\"data\":{\"start\":%lu,\"count\":%u}}",
+            "{\"type\":\"station\",\"subType\":\"%s\",\"data\":{\"start\":%lu,\"count\":%u}}",
+            fmo_stations_query_name(stations->category),
             (unsigned long)(stations->counting ? stations->count_probe : stations->start),
             stations->counting ? 1 : FMO_STATION_PAGE_SIZE + 1);
         stations->request = FMO_STATION_LIST_WAIT;
@@ -657,6 +672,18 @@ static esp_err_t start_socket(fmo_socket_t *socket, const char *uri)
         socket->client = NULL;
     }
     return err;
+}
+
+/* Resolve the associated network on every new client, including after Wi-Fi
+ * switching. esp_websocket_client_init copies the URI into client storage. */
+static esp_err_t start_target_socket(fmo_socket_t *socket, const char *path)
+{
+    fmo_endpoint_t endpoint;
+    fmo_provision_get_endpoint(&endpoint);
+    char uri[160];
+    int length = snprintf(uri, sizeof(uri), "ws://%s:%u/%s", endpoint.host, endpoint.port, path);
+    if (length < 0 || length >= (int)sizeof(uri)) return ESP_ERR_INVALID_ARG;
+    return start_socket(socket, uri);
 }
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -997,22 +1024,6 @@ static void network_task(void *argument)
         retry_wifi();
     }
 
-    fmo_endpoint_t endpoint;
-    fmo_provision_get_endpoint(&endpoint);
-    char events_uri[160];
-    char control_uri[160];
-    int events_length = snprintf(events_uri, sizeof(events_uri), "ws://%s:%d/events",
-                                 endpoint.host, endpoint.port);
-    int control_length = snprintf(control_uri, sizeof(control_uri), "ws://%s:%d/ws",
-                                  endpoint.host, endpoint.port);
-    if (events_length < 0 || events_length >= (int)sizeof(events_uri) ||
-        control_length < 0 || control_length >= (int)sizeof(control_uri)) {
-        post_error("FMO HOST TOO LONG");
-        s_network_task = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
     unsigned diagnostics_tick = 0;
     for (;;) {
         check_setup_request();
@@ -1031,11 +1042,11 @@ static void network_task(void *argument)
         if (xEventGroupGetBits(s_wifi_bits) & FMO_WIFI_READY_BIT) {
             update_clock_service(true);
             if (!stations_paused && !s_events_socket.client) {
-                err = start_socket(&s_events_socket, events_uri);
+                err = start_target_socket(&s_events_socket, "events");
                 if (err != ESP_OK) ESP_LOGW(TAG, "Events client creation failed; retrying");
             }
             if (!s_control_socket.client) {
-                err = start_socket(&s_control_socket, control_uri);
+                err = start_target_socket(&s_control_socket, "ws");
                 if (err != ESP_OK) ESP_LOGW(TAG, "Control client creation failed; retrying");
             }
             request_local_position();
@@ -1129,13 +1140,16 @@ void fmo_network_cancel_setup(void)
         xEventGroupSetBits(s_wifi_bits, FMO_WIFI_CANCEL_BIT);
 }
 
-bool fmo_network_request_stations(uint32_t start)
+bool fmo_network_request_stations(fmo_station_category_t category, uint32_t start)
 {
+    if ((unsigned)category >= FMO_STATION_CATEGORY_COUNT) return false;
     if (!s_network_task || !s_state_lock || xSemaphoreTake(s_state_lock, 0) != pdTRUE) return false;
     bool accepted = s_snapshot.state.wifi_connected && s_snapshot.state.control_connected &&
-                    fmo_stations_load(&s_snapshot.stations, start, now_ms());
+                    fmo_stations_load(&s_snapshot.stations, category, start, now_ms());
     if (accepted) fmo_stations_begin_count(&s_snapshot.stations, now_ms());
     if (!accepted && s_snapshot.stations.request == FMO_STATION_NONE) {
+        s_snapshot.stations.category = category;
+        s_snapshot.stations.total_known = false;
         s_snapshot.stations.status = FMO_STATIONS_LOAD_FAILED;
         s_snapshot.stations.start = start;
         s_snapshot.stations.count = 0;

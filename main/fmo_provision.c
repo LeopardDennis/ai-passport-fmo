@@ -29,7 +29,6 @@ typedef struct {
     bool probe;
     fmo_endpoint_t destination;
 } setup_request_t;
-static fmo_endpoint_t s_endpoint;
 static fmo_wifi_profiles_t s_profiles;
 static SemaphoreHandle_t s_profiles_lock;
 static esp_err_t save_profiles(const fmo_wifi_profiles_t *profiles, bool finish)
@@ -37,7 +36,7 @@ static esp_err_t save_profiles(const fmo_wifi_profiles_t *profiles, bool finish)
     nvs_handle_t nvs;
     esp_err_t err = nvs_open("fmo_wifi", NVS_READWRITE, &nvs);
     if (err != ESP_OK) return err;
-    err = nvs_set_blob(nvs, "profiles_v1", profiles, sizeof(*profiles));
+    err = nvs_set_blob(nvs, "profiles_v2", profiles, sizeof(*profiles));
     if (err == ESP_OK && finish) err = nvs_set_u8(nvs, "setup", 0);
     if (err == ESP_OK) err = nvs_commit(nvs);
     nvs_close(nvs);
@@ -52,11 +51,37 @@ static void to_wifi_config(wifi_config_t *config, const credentials_t *value)
     config->sta.threshold.authmode = value->password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 }
 
-void fmo_provision_get_endpoint(fmo_endpoint_t *endpoint)
+static void default_endpoint(fmo_endpoint_t *endpoint)
 {
     memset(endpoint, 0, sizeof(*endpoint));
     snprintf(endpoint->host, sizeof(endpoint->host), "%s", CONFIG_FMO_HOST[0] ? CONFIG_FMO_HOST : "fmo.local");
     endpoint->port = CONFIG_FMO_PORT;
+}
+
+/* Caller holds the profiles lock. Unknown networks use the firmware default. */
+static void endpoint_for_wifi(const char *ssid, fmo_endpoint_t *endpoint)
+{
+    default_endpoint(endpoint);
+    int index = fmo_wifi_profiles_find(&s_profiles, ssid);
+    if (index >= 0 && fmo_endpoint_valid(&s_profiles.endpoints[index]))
+        *endpoint = s_profiles.endpoints[index];
+}
+
+void fmo_provision_get_endpoint(fmo_endpoint_t *endpoint)
+{
+    default_endpoint(endpoint);
+    if (!s_profiles_lock) return;
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return;
+    ap.ssid[32] = 0;
+    xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
+    endpoint_for_wifi((char *)ap.ssid, endpoint);
+    xSemaphoreGive(s_profiles_lock);
+}
+
+static void legacy_endpoint(fmo_endpoint_t *endpoint)
+{
+    default_endpoint(endpoint);
     nvs_handle_t nvs;
     if (nvs_open("fmo_net", NVS_READONLY, &nvs) != ESP_OK) return;
     fmo_endpoint_t saved = {0};
@@ -66,16 +91,14 @@ void fmo_provision_get_endpoint(fmo_endpoint_t *endpoint)
     nvs_close(nvs);
 }
 
-static esp_err_t save_endpoint(const fmo_endpoint_t *endpoint)
+/* Caller holds the lock; failed commits leave the live profile unchanged. */
+static esp_err_t save_endpoint(const char *ssid, const fmo_endpoint_t *endpoint)
 {
-    nvs_handle_t nvs;
-    esp_err_t err = nvs_open("fmo_net", NVS_READWRITE, &nvs);
-    if (err != ESP_OK) return err;
-    err = nvs_set_blob(nvs, "endpoint_v1", endpoint, sizeof(*endpoint));
-    if (err == ESP_OK) err = nvs_commit(nvs);
-    nvs_close(nvs);
-    if (err == ESP_OK) s_endpoint = *endpoint;
-    return err;
+    int index = fmo_wifi_profiles_find(&s_profiles, ssid);
+    if (index < 0 || !fmo_endpoint_valid(endpoint)) return ESP_ERR_INVALID_ARG;
+    fmo_wifi_profiles_t updated = s_profiles;
+    updated.endpoints[index] = *endpoint;
+    return save_profiles(&updated, false);
 }
 
 /* Only checks DNS/TCP reachability; does not claim WebSocket/API compatibility.
@@ -155,43 +178,41 @@ static wifi_ap_record_t s_records[16];
 static uint16_t s_record_count;
 static const char page[] =
 "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>FMO Wi-Fi 配网</title><style>body{background:#101010;color:#eee;font:16px system-ui;max-width:440px;margin:32px auto;padding:20px}"
-"h1{color:#ff8a00}input,select,button{box-sizing:border-box;width:100%;padding:14px;margin:8px 0 18px;font:inherit}button{-webkit-appearance:none;appearance:none;background:#ff8a00;color:#101010;border:0}button:disabled{opacity:.55}small{color:#bbb}</style>"
-"<h1>FMO · Wi-Fi 配网</h1><p>连接成功后自动寻找 fmo.local</p>"
+"<title>FMO Wi-Fi 配网</title><style>body{background:#101010;color:#eee;font:16px system-ui;max-width:440px;margin:32px auto;padding:20px}h1{color:#ff8a00}input,select,button{box-sizing:border-box;width:100%;padding:14px;margin:8px 0 18px;font:inherit}button{-webkit-appearance:none;appearance:none;background:#ff8a00;color:#101010;border:0}button:disabled{opacity:.55}small{color:#bbb}</style>"
+"<h1>FMO · Wi-Fi 配网</h1><p>每组 Wi-Fi 单独保存 FMO 地址，切换网络时自动恢复。</p>"
 "<form id='form' autocomplete='off'><label for='net'>附近的 2.4 GHz Wi-Fi</label><select id='net'><option value=''>手动输入 / 隐藏网络</option></select>"
 "<label for='ssid'>Wi-Fi 名称</label><input id='ssid' required autocomplete='off'>"
 "<label for='pass'>Wi-Fi 密码</label><input id='pass' type='password' autocomplete='off' autocorrect='off' autocapitalize='none' spellcheck='false'>"
-"<small>开放网络可留空；加密网络密码为 8–63 字节。</small><button id='save'>连接并保存</button></form>"
-"<p id='result' role='status'></p><h2>FMO 地址</h2><form id='fmoform'>"
-"<label for='host'>主机名或 IPv4 地址</label><input id='host' required maxlength='120' autocomplete='off'>"
+"<small>开放网络可留空；加密网络密码为 8–63 字节。</small>"
+"<h2>此 Wi-Fi 的 FMO 地址</h2><label for='host'>主机名或 IPv4 地址</label><input id='host' required maxlength='120' autocomplete='off'>"
 "<label for='port'>端口</label><input id='port' type='number' min='1' max='65535' required value='80'>"
-"<button id='fmosave'>保存 FMO 地址</button><button id='fmotest' type='button'>检查端口</button></form>"
-"<small>检查使用已保存 Wi-Fi；端口可达不代表 FMO 接口兼容。新 Wi-Fi 保存成功后，可再次进入配网检查。</small>"
+"<button id='save' disabled>连接并保存 Wi-Fi 和 FMO 地址</button><button id='fmosave' type='button' disabled>仅更新已保存网络的 FMO 地址</button><button id='fmotest' type='button' disabled>检查端口</button></form>"
+"<p id='result' role='status'></p><small>检查会连接所选的已保存 Wi-Fi；端口可达不代表 FMO 接口兼容。新网络请先连接并保存。</small>"
 "<h2>已保存网络（最多 5 组）</h2><div id='saved'></div>"
 "<p><small>位置数据 © <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap contributors</a> · Photon</small></p>"
-"<button id='finish' type='button'>完成并连接已保存网络</button><script>const token='";
+"<button id='finish' type='button' disabled>完成并连接已保存网络</button><script>const token='";
 static const char page_end[] =
 "';const form=document.getElementById('form'),ssid=document.getElementById('ssid'),pass=document.getElementById('pass'),net=document.getElementById('net'),save=document.getElementById('save'),result=document.getElementById('result');"
+"const saved=document.getElementById('saved'),finish=document.getElementById('finish'),host=document.getElementById('host'),port=document.getElementById('port'),fmosave=document.getElementById('fmosave'),fmotest=document.getElementById('fmotest');let savedCount=0,targets=null,working=false;"
+"function busy(value){working=value;save.disabled=value||!targets;fmosave.disabled=value||!targets;fmotest.disabled=value||!targets;finish.disabled=value||savedCount===0;ssid.disabled=pass.disabled=net.disabled=host.disabled=port.disabled=value||!targets}"
+"function selectTarget(){if(!targets)return;const t=targets.networks.find(n=>n.ssid===ssid.value)||targets;host.value=t.host;port.value=t.port;pass.value=''}"
+"net.onchange=()=>{if(net.value){ssid.value=net.value;selectTarget()}};ssid.onchange=selectTarget;"
 "fetch('/networks').then(r=>r.json()).then(a=>a.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;net.append(o)})).catch(()=>{});"
-"net.onchange=()=>{if(net.value)ssid.value=net.value};"
-"const saved=document.getElementById('saved'),finish=document.getElementById('finish'),host=document.getElementById('host'),port=document.getElementById('port'),fmosave=document.getElementById('fmosave'),fmotest=document.getElementById('fmotest');let savedCount=0;"
-"function busy(value){save.disabled=value;fmosave.disabled=value;fmotest.disabled=value;finish.disabled=value||savedCount===0}"
-"fetch('/fmo',{cache:'no-store'}).then(r=>r.json()).then(s=>{host.value=s.host;port.value=s.port}).catch(()=>{result.textContent='读取 FMO 地址失败，请刷新。'});"
-"function target(probe){return submit({host:host.value.trim(),port:Number(port.value),probe},'/fmo')}"
-"document.getElementById('fmoform').onsubmit=e=>{e.preventDefault();target(false)};fmotest.onclick=()=>target(true);"
-"async function refreshSaved(){const r=await fetch('/saved',{cache:'no-store'});if(!r.ok)throw Error();const a=await r.json();savedCount=a.length;saved.replaceChildren();a.forEach(n=>{const row=document.createElement('div'),text=document.createElement('span'),button=document.createElement('button');text.textContent=n;button.textContent='删除';button.type='button';button.onclick=()=>{if(confirm('删除已保存网络 '+n+'？'))submit({ssid:n,password:'',remove:true})};row.append(text,button);saved.append(row)});finish.disabled=a.length===0}"
-"refreshSaved().catch(()=>{result.textContent='读取列表失败，请刷新。'});finish.onclick=()=>submit({ssid:'',password:'',finish:true});"
+"async function refreshTargets(initial=false){const r=await fetch('/fmo',{cache:'no-store'});if(!r.ok)throw Error();targets=await r.json();if(initial){ssid.value=targets.ssid;selectTarget()}}"
+"async function refreshSaved(){const r=await fetch('/saved',{cache:'no-store'});if(!r.ok)throw Error();const a=await r.json();savedCount=a.length;saved.replaceChildren();a.forEach(n=>{const row=document.createElement('div'),choose=document.createElement('button'),button=document.createElement('button');choose.textContent=n;choose.type='button';choose.onclick=()=>{if(!working){ssid.value=n;selectTarget()}};button.textContent='删除';button.type='button';button.onclick=()=>{if(!working&&confirm('删除已保存网络 '+n+'？'))submit({ssid:n,password:'',remove:true})};row.append(choose,button);saved.append(row)});finish.disabled=working||a.length===0}"
+"busy(false);Promise.all([refreshTargets(true),refreshSaved()]).then(()=>busy(false)).catch(()=>{result.textContent='读取配置失败，请刷新。'});"
+"function target(probe){if(!targets?.networks.some(n=>n.ssid===ssid.value)){result.textContent='此 Wi-Fi 尚未保存，请先填写密码并连接保存。';return}return submit({ssid:ssid.value,host:host.value.trim(),port:Number(port.value),probe},'/fmo')}"
+"fmosave.onclick=()=>target(false);fmotest.onclick=()=>target(true);finish.onclick=()=>submit({ssid:targets?.networks.some(n=>n.ssid===ssid.value)?ssid.value:'',password:'',finish:true});"
 "async function poll(){try{const r=await fetch('/status',{cache:'no-store'});const s=await r.json();"
 "if(s===3){result.textContent='配网成功，热点即将关闭。设备正在连接 FMO。';pass.value='';return}"
-"if(s===5){result.textContent='已删除';busy(false);await refreshSaved();return}"
+"if(s===5){result.textContent='已删除';await Promise.all([refreshSaved(),refreshTargets()]);busy(false);return}"
 "if(s===6){result.textContent='已满 5 组，请先删除一个网络。';busy(false);return}"
-"if(s>=11&&s<=14){result.textContent=s===11?'FMO 地址已保存，完成配网后生效。':s===12?'Wi-Fi 尚未连接，请先保存可用网络。':s===13?'端口可达；FMO 接口状态请查看设备守听页。':'地址解析或端口连接失败，请检查地址和同网访问权限。';busy(false);return}"
+"if(s>=11&&s<=14){result.textContent=s===11?'此 Wi-Fi 的 FMO 地址已保存，完成配网后生效。':s===12?'Wi-Fi 尚未连接，请先保存可用网络。':s===13?'端口可达；FMO 接口状态请查看设备守听页。':'地址解析或端口连接失败，请检查地址和同网访问权限。';if(s===11)await refreshTargets();busy(false);return}"
 "if(s>=7&&s<=10){result.textContent=s===7?'密码或认证失败，请重试。':s===8?'未找到该 Wi-Fi，请检查名称和信号。':s===9?'Wi-Fi 安全模式不兼容。':'已连接 Wi-Fi，但获取 IP 超时。';busy(false);return}"
 "if(s===2||s===4){result.textContent=s===2?'连接失败，请检查密码和信号后重试。':'保存失败，旧配置未被主动删除。请重试。';busy(false);return}"
-"result.textContent='正在验证连接，请稍候…';setTimeout(poll,1000)}catch(e){result.textContent='请查看设备屏幕；若仍在配网，请重新连接热点并刷新。';save.disabled=false}}"
-"async function submit(data,url='/configure'){busy(true);try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Setup-Token':token},body:JSON.stringify(data)});"
-"if(!r.ok)throw Error();poll()}catch(e){result.textContent='提交失败，请检查输入或等待当前操作完成。';save.disabled=false}}"
-"form.onsubmit=e=>{e.preventDefault();submit({ssid:ssid.value,password:pass.value})};</script></html>";
+"result.textContent='正在验证连接，请稍候…';setTimeout(poll,1000)}catch(e){result.textContent='请查看设备屏幕；若仍在配网，请重新连接热点并刷新。';busy(false)}}"
+"async function submit(data,url='/configure'){busy(true);try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Setup-Token':token},body:JSON.stringify(data)});if(!r.ok)throw Error();poll()}catch(e){result.textContent='提交失败，请检查输入或等待当前操作完成。';busy(false)}}"
+"form.onsubmit=e=>{e.preventDefault();submit({ssid:ssid.value,password:pass.value,host:host.value.trim(),port:Number(port.value)})};</script></html>";
 
 static bool local_request(httpd_req_t *req)
 {
@@ -266,6 +287,18 @@ static esp_err_t saved_get(httpd_req_t *req)
     cJSON_free(json);
     return err;
 }
+static bool parse_endpoint(const cJSON *json, fmo_endpoint_t *endpoint)
+{
+    const cJSON *host = cJSON_GetObjectItemCaseSensitive(json, "host");
+    const cJSON *port = cJSON_GetObjectItemCaseSensitive(json, "port");
+    if (!cJSON_IsString(host) || strlen(host->valuestring) > FMO_HOST_MAX ||
+        !cJSON_IsNumber(port) || !(port->valuedouble >= 1 && port->valuedouble <= 65535) ||
+        port->valuedouble != (uint16_t)port->valuedouble) return false;
+    strcpy(endpoint->host, host->valuestring);
+    endpoint->port = (uint16_t)port->valuedouble;
+    return fmo_endpoint_valid(endpoint);
+}
+
 static esp_err_t configure_post(httpd_req_t *req)
 {
     char token[33];
@@ -291,8 +324,10 @@ static esp_err_t configure_post(httpd_req_t *req)
     request.remove = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "remove"));
     request.finish = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "finish"));
     bool valid = !(request.remove && request.finish) && cJSON_IsString(ssid) && cJSON_IsString(password) &&
-        (request.finish ? !ssid->valuestring[0] && !password->valuestring[0] :
+        (request.finish ? !password->valuestring[0] && (!ssid->valuestring[0] ||
+            fmo_credentials_valid(ssid->valuestring, strlen(ssid->valuestring), "", 0)) :
          fmo_credentials_valid(ssid->valuestring, strlen(ssid->valuestring), password->valuestring, strlen(password->valuestring)));
+    if (valid && !request.remove && !request.finish) valid = parse_endpoint(json, &request.destination);
     if (valid) {strcpy(request.value.ssid, ssid->valuestring); strcpy(request.value.password, password->valuestring);}
     cJSON_Delete(json); memset(body, 0, sizeof(body));
     if (!valid) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid credentials");
@@ -307,14 +342,34 @@ static esp_err_t configure_post(httpd_req_t *req)
 static esp_err_t endpoint_get(httpd_req_t *req)
 {
     if (!local_request(req)) return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "AP only");
-    char json[FMO_HOST_MAX + 40];
+    cJSON *json = cJSON_CreateObject();
+    if (!json) return ESP_ERR_NO_MEM;
+    cJSON *networks = cJSON_AddArrayToObject(json, "networks");
+    fmo_endpoint_t endpoint;
+    default_endpoint(&endpoint);
+    cJSON_AddStringToObject(json, "host", endpoint.host);
+    cJSON_AddNumberToObject(json, "port", endpoint.port);
     xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
-    // Validated hostnames contain no JSON metacharacters.
-    snprintf(json, sizeof(json), "{\"host\":\"%s\",\"port\":%u}", s_endpoint.host, s_endpoint.port);
+    cJSON_AddStringToObject(json, "ssid", s_profiles.count ?
+        s_profiles.entries[s_profiles.preferred].ssid : "");
+    for (unsigned i = 0; networks && i < s_profiles.count; ++i) {
+        cJSON *item = cJSON_CreateObject();
+        if (!item) { cJSON_Delete(json); xSemaphoreGive(s_profiles_lock); return ESP_ERR_NO_MEM; }
+        endpoint_for_wifi(s_profiles.entries[i].ssid, &endpoint);
+        cJSON_AddStringToObject(item, "ssid", s_profiles.entries[i].ssid);
+        cJSON_AddStringToObject(item, "host", endpoint.host);
+        cJSON_AddNumberToObject(item, "port", endpoint.port);
+        cJSON_AddItemToArray(networks, item);
+    }
     xSemaphoreGive(s_profiles_lock);
+    char *body = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (!body) return ESP_ERR_NO_MEM;
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_sendstr(req, json);
+    esp_err_t err = httpd_resp_sendstr(req, body);
+    cJSON_free(body);
+    return err;
 }
 
 static esp_err_t endpoint_post(httpd_req_t *req)
@@ -322,9 +377,9 @@ static esp_err_t endpoint_post(httpd_req_t *req)
     char token[33];
     if (!local_request(req) || httpd_req_get_hdr_value_str(req, "X-Setup-Token", token, sizeof(token)) != ESP_OK ||
         strcmp(token, s_token)) return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Invalid session");
-    if (!req->content_len || req->content_len > 256)
+    if (!req->content_len || req->content_len > 768)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid length");
-    char body[257];
+    char body[769];
     size_t used = 0;
     int64_t deadline = esp_timer_get_time() + 10000000;
     while (used < req->content_len) {
@@ -336,17 +391,16 @@ static esp_err_t endpoint_post(httpd_req_t *req)
     body[used] = 0;
     cJSON *json = (memchr(body, 0, used) || fmo_text_json_has_nul(body)) ? NULL :
         cJSON_ParseWithOpts(body, NULL, true);
-    const cJSON *host = cJSON_GetObjectItemCaseSensitive(json, "host");
-    const cJSON *port = cJSON_GetObjectItemCaseSensitive(json, "port");
     setup_request_t request = { .endpoint = true };
-    bool valid = cJSON_IsString(host) && strlen(host->valuestring) <= FMO_HOST_MAX &&
-        cJSON_IsNumber(port) && port->valuedouble >= 1 && port->valuedouble <= 65535 &&
-        port->valuedouble == (uint16_t)port->valuedouble;
+    request.probe = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "probe"));
+    const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(json, "ssid");
+    bool valid = parse_endpoint(json, &request.destination) && cJSON_IsString(ssid) &&
+        fmo_credentials_valid(ssid->valuestring, strlen(ssid->valuestring), "", 0);
     if (valid) {
-        strcpy(request.destination.host, host->valuestring);
-        request.destination.port = (uint16_t)port->valuedouble;
-        request.probe = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "probe"));
-        valid = fmo_endpoint_valid(&request.destination);
+        strcpy(request.value.ssid, ssid->valuestring);
+        xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
+        valid = fmo_wifi_profiles_find(&s_profiles, request.value.ssid) >= 0;
+        xSemaphoreGive(s_profiles_lock);
     }
     cJSON_Delete(json);
     if (!valid) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid target");
@@ -363,7 +417,6 @@ static esp_err_t endpoint_post(httpd_req_t *req)
 bool fmo_provision_load(wifi_config_t *config, bool *force)
 {
     *force = false;
-    fmo_provision_get_endpoint(&s_endpoint);
     if (!s_profiles_lock) s_profiles_lock = xSemaphoreCreateMutex();
     if (!s_profiles_lock) return false;
     xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
@@ -376,18 +429,30 @@ bool fmo_provision_load(wifi_config_t *config, bool *force)
     *force = flag != 0;
     fmo_wifi_profiles_t profiles;
     size_t size = sizeof(profiles);
-    esp_err_t err = nvs_get_blob(nvs, "profiles_v1", &profiles, &size);
+    esp_err_t err = nvs_get_blob(nvs, "profiles_v2", &profiles, &size);
     bool migrate = false;
     xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
     if (err == ESP_OK && size == sizeof(profiles) && fmo_wifi_profiles_valid(&profiles)) {
         s_profiles = profiles;
     } else if (err == ESP_ERR_NVS_NOT_FOUND) {
-        credentials_t old = {0};
-        size = sizeof(old);
-        err = nvs_get_blob(nvs, "credentials", &old, &size);
-        if (err == ESP_OK && size == sizeof(old))
-            migrate = fmo_wifi_profiles_put(&s_profiles, &old);
-        memset(&old, 0, sizeof(old));
+        fmo_endpoint_t endpoint;
+        legacy_endpoint(&endpoint);
+        fmo_wifi_profiles_v1_t old_profiles;
+        size = sizeof(old_profiles);
+        err = nvs_get_blob(nvs, "profiles_v1", &old_profiles, &size);
+        if (err == ESP_OK && size == sizeof(old_profiles))
+            migrate = fmo_wifi_profiles_migrate(&s_profiles, &old_profiles, &endpoint);
+        else if (err == ESP_ERR_NVS_NOT_FOUND) {
+            credentials_t old = {0};
+            size = sizeof(old);
+            err = nvs_get_blob(nvs, "credentials", &old, &size);
+            if (err == ESP_OK && size == sizeof(old)) {
+                migrate = fmo_wifi_profiles_put(&s_profiles, &old);
+                if (migrate) s_profiles.endpoints[0] = endpoint;
+            }
+            memset(&old, 0, sizeof(old));
+        }
+        memset(&old_profiles, 0, sizeof(old_profiles));
     }
     nvs_close(nvs);
     /* Keep the legacy blob intact on migration failure. An empty new-format
@@ -435,12 +500,13 @@ void fmo_provision_remember_connected(void)
     wifi_ap_record_t ap;
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return;
     ap.ssid[32] = 0;
-    int index = fmo_wifi_profiles_find(&s_profiles, (char *)ap.ssid);
-    if (index < 0 || index == s_profiles.preferred) return;
-    fmo_wifi_profiles_t updated = s_profiles;
-    updated.preferred = (uint8_t)index;
     xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
-    save_profiles(&updated, false);
+    int index = fmo_wifi_profiles_find(&s_profiles, (char *)ap.ssid);
+    if (index >= 0 && index != s_profiles.preferred) {
+        fmo_wifi_profiles_t updated = s_profiles;
+        updated.preferred = (uint8_t)index;
+        save_profiles(&updated, false);
+    }
     xSemaphoreGive(s_profiles_lock);
 }
 
@@ -550,13 +616,14 @@ esp_err_t fmo_provision_run(EventGroupHandle_t bits, EventBits_t ready, fmo_setu
             if (request.probe) {
                 // Rejoin an already saved network for a LAN-only port check.
                 // This never verifies or persists a new Wi-Fi credential.
-                if (!(xEventGroupGetBits(bits) & ready) && s_profiles.count) {
+                int index = fmo_wifi_profiles_find(&s_profiles, request.value.ssid);
+                if (index >= 0) {
                     if (station_attempted) {
                         err = restart_station(bits, ready);
                         if (err != ESP_OK) goto done;
                     }
                     wifi_config_t selected;
-                    to_wifi_config(&selected, &s_profiles.entries[s_profiles.preferred]);
+                    to_wifi_config(&selected, &s_profiles.entries[index]);
                     xEventGroupClearBits(bits, ready | FMO_WIFI_DISCONNECTED_BIT);
                     err = esp_wifi_set_config(WIFI_IF_STA, &selected);
                     memset(&selected, 0, sizeof(selected));
@@ -570,7 +637,7 @@ esp_err_t fmo_provision_run(EventGroupHandle_t bits, EventBits_t ready, fmo_setu
                     probe_endpoint(&request.destination) ? 13 : 14);
             } else {
                 xSemaphoreTake(s_profiles_lock, portMAX_DELAY);
-                err = save_endpoint(&request.destination);
+                err = save_endpoint(request.value.ssid, &request.destination);
                 xSemaphoreGive(s_profiles_lock);
                 atomic_store(&s_status, err == ESP_OK ? 11 : 4);
             }
@@ -594,6 +661,11 @@ esp_err_t fmo_provision_run(EventGroupHandle_t bits, EventBits_t ready, fmo_setu
             continue;
         }
         if (request.finish) {
+            if (value.ssid[0]) {
+                int index = fmo_wifi_profiles_find(&updated, value.ssid);
+                if (index < 0) {atomic_store(&s_status, 2); continue;}
+                updated.preferred = (uint8_t)index;
+            }
             if (!updated.count) {atomic_store(&s_status, 2); continue;}
             if (station_attempted) {
                 err = restart_station(bits, ready);
@@ -621,6 +693,7 @@ esp_err_t fmo_provision_run(EventGroupHandle_t bits, EventBits_t ready, fmo_setu
             memset(&value, 0, sizeof(value));
             continue;
         }
+        updated.endpoints[updated.preferred] = request.destination;
         if (station_attempted) {
             err = restart_station(bits, ready);
             if (err != ESP_OK) goto done;

@@ -6,6 +6,12 @@
 
 ## Unreleased
 
+- Save the FMO host and port with each Wi-Fi profile, submit both together after verified DHCP, and restore the matching destination for events, control and audio after switching networks. Migrate legacy global addresses, refill the setup form when selecting saved networks, and cover reboot, migration, deletion and storage-failure behavior.
+
+- Scroll overflowing place names within their own viewport at 30 pixels per second, pausing at both ends; keep bearing and distance fixed. Reuse the awake 50 ms UI timer without new widgets, preserve animation across unchanged snapshots, and verify clipping, motion and menu lifecycle.
+
+- Add favorites, active and all station categories backed by the connected FMO APIs, with a remembered category until reboot and two-level return navigation. Reuse six-row paging and verified switching; isolate category replies, preserve playback while browsing, count all three categories with bounded probes, and cover controls, parser errors/timeouts and native UI memory.
+
 - Remove the new-password hint from the phone Wi-Fi password field and request autocomplete off on the form and field, with correction, capitalization and spellcheck disabled. Keep masked entry and the existing submission flow. System password-manager prompts remain browser-controlled and need iPhone validation.
 
 - Recover battery display after failed startup initialization: retain the sampling worker and retry unavailable readings once a minute while awake. Port the verified original-cell profile initialization and bounded retry from PDKPASS; preserve two-minute healthy polling, pause while dark and sample on wake. Add driver fault-injection and application scheduling regressions. Deep-discharge recovery still requires device validation.

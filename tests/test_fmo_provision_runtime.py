@@ -62,7 +62,7 @@ static int status_get(void){return 0;} static int saved_get(void){return 0;}
 static int configure_post(void){return 0;}
 static int endpoint_get(void){return 0;} static int endpoint_post(void){return 0;}
 static int endpoint_saves,probes;
-static int save_endpoint(const fmo_endpoint_t *e){assert(!strcmp(e->host,"fmo.local"));++endpoint_saves;return 0;}
+static int save_endpoint(const char *ssid,const fmo_endpoint_t *e){assert(!strcmp(ssid,"old"));assert(!strcmp(e->host,"fmo.local"));++endpoint_saves;return 0;}
 static bool probe_endpoint(const fmo_endpoint_t *e);
 static int s_profiles_lock=1;
 static void *s_pending;
@@ -95,7 +95,7 @@ static int esp_wifi_set_config(int i,const wifi_config_t *c){if(i==WIFI_IF_STA)s
 static int esp_wifi_connect(void){++connects;return 0;}
 static int esp_wifi_disconnect(void){bits&=~FMO_WIFI_READY_BIT;return 0;}
 static int esp_wifi_get_mac(int i,uint8_t *m){(void)i;memset(m,0,6);return 0;}
-static int esp_wifi_sta_get_ap_info(wifi_ap_record_t *a){memcpy(a->ssid,selected.sta.ssid,32);return 0;}
+static int esp_wifi_sta_get_ap_info(wifi_ap_record_t *a){memcpy(a->ssid,selected.sta.ssid,32);if(scenario==15)strcpy((char *)a->ssid,"wrong");return 0;}
 static int esp_wifi_scan_start(void *s,bool sync){(void)s;(void)sync;return 0;}
 static int esp_wifi_scan_get_ap_records(uint16_t *n,void *r){(void)r;*n=0;return 0;}
 static void esp_wifi_clear_ap_list(void){}
@@ -111,21 +111,26 @@ static void *xQueueCreate(int n,size_t size){(void)n;(void)size;return scenario=
 static void vQueueDelete(void *q){assert(q && (http_stopped || scenario==10 || scenario==11));}
 static int xQueueReceive(void *q,setup_request_t *r,int wait){
     assert(q && wait==500); memset(r,0,sizeof(*r));
+    if(scenario==14 || scenario==15){
+        if(step++>0){assert(atomic_load(&s_status)==(scenario==14?4:10));bits|=FMO_WIFI_CANCEL_BIT;return 0;}
+        strcpy(r->value.ssid,"old");strcpy(r->value.password,"new-password");r->destination=(fmo_endpoint_t){.host="new.local",.port=1234};return 1;
+    }
     if(scenario>=5){
         if(step++==0){
-            r->endpoint=true;r->probe=scenario!=5;strcpy(r->destination.host,"fmo.local");r->destination.port=80;return 1;
+            strcpy(r->value.ssid,"old");r->endpoint=true;r->probe=scenario!=5;strcpy(r->destination.host,"fmo.local");r->destination.port=80;return 1;
         }
         assert(atomic_load(&s_status)==(scenario==5?11:scenario==6?13:scenario==7?14:12));
         bits|=FMO_WIFI_CANCEL_BIT;return 0;
     }
     if(scenario==2 && step++==0){r->remove=true;strcpy(r->value.ssid,"old");return 1;}
     if(scenario==2){bits|=FMO_WIFI_CANCEL_BIT;return 0;}
-    if(scenario==4){r->finish=true;return 1;}
-    strcpy(r->value.ssid,"new");strcpy(r->value.password,"new-password");return 1;
+    if(scenario==4){r->finish=true;strcpy(r->value.ssid,"old");return 1;}
+    strcpy(r->value.ssid,"new");strcpy(r->value.password,"new-password");r->destination=(fmo_endpoint_t){.host="new.local",.port=8080};return 1;
 }
 static void xSemaphoreTake(int m,int timeout){assert(m);(void)timeout;}
 static void xSemaphoreGive(int m){assert(m);}
 static int save_profiles(const fmo_wifi_profiles_t *p,bool finish){
+    if(scenario==14 && !(bits&FMO_WIFI_CANCEL_BIT))return -3;
     s_profiles=*p;++saves;if(finish)forced=0;return 0;
 }
 static void to_wifi_config(wifi_config_t *c,const credentials_t *v){
@@ -153,6 +158,7 @@ int main(void){
         } else if(scenario==3){
             assert(s_profiles.count==2 && connects==1 && saves==1);
             assert(!strcmp((char *)selected.sta.ssid,"new"));
+            assert(!strcmp(s_profiles.endpoints[1].host,"new.local") && s_profiles.endpoints[1].port==8080);
         } else {assert(s_profiles.count==1 && !connects && saves==1);}
     }
     for(scenario=5;scenario<=8;++scenario){
@@ -176,11 +182,21 @@ int main(void){
         assert(fmo_provision_run(1,FMO_WIFI_READY_BIT,display)!=0 && !s_pending);
         assert(http_stopped==(scenario==12));
     }
+    for(scenario=14;scenario<=15;++scenario){
+        fmo_wifi_profiles_init(&s_profiles);
+        credentials_t previous={.ssid="old",.password="old-password"};
+        assert(fmo_wifi_profiles_put(&s_profiles,&previous));
+        s_profiles.endpoints[0]=(fmo_endpoint_t){.host="old.local",.port=8080};
+        bits=0;step=stop_count=http_stopped=saves=connects=0;forced=1;
+        assert(fmo_provision_run(1,FMO_WIFI_READY_BIT,display)==0);
+        assert(!strcmp(s_profiles.entries[0].password,"old-password"));
+        assert(!strcmp(s_profiles.endpoints[0].host,"old.local") && s_profiles.endpoints[0].port==8080);
+    }
     puts("FMO provisioning runtime: PASS (cancel idle/connecting/deleted list, verified save, finish)");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='fmo-provision-test-') as tmp:
     file=Path(tmp)/'provision.c';file.write_text(preamble+functions+tests)
     binary=Path(tmp)/'provision'
-    subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror','-I'+str(ROOT/'main'),str(file),str(ROOT/'main/fmo_wifi_profiles.c'),str(ROOT/'main/fmo_credentials.c'),'-o',str(binary)],check=True)
+    subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror','-I'+str(ROOT/'main'),str(file),str(ROOT/'main/fmo_wifi_profiles.c'),str(ROOT/'main/fmo_credentials.c'),str(ROOT/'main/fmo_endpoint.c'),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)

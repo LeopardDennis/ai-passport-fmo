@@ -113,7 +113,9 @@ void vTaskDelay(unsigned ticks) {
         if(writes==2) {assert(fmo_audio_get_level()==0);longjmp(done,1);}
     }
 }
-void fmo_provision_get_endpoint(fmo_endpoint_t *e) {strcpy(e->host,"fmo.test");e->port=8080;}
+static fmo_endpoint_t target_endpoint={.host="fmo.test",.port=8080};
+static char captured_uri[160];
+void fmo_provision_get_endpoint(fmo_endpoint_t *e) {*e=target_endpoint;}
 esp_err_t bsp_audio_init_playback(void) {assert(!locked);++codec_inits;return codec_fail ? ESP_FAIL : ESP_OK;}
 esp_err_t bsp_audio_set_format(uint32_t rate,uint8_t bits,uint8_t channels) {
     assert(!locked && rate==8000 && bits==16 && channels==1);++formats;return ESP_OK;
@@ -126,7 +128,8 @@ esp_err_t esp_wifi_set_ps(wifi_ps_type_t ps) {
 }
 void bsp_audio_set_volume(uint8_t volume) {assert(!locked);applied=volume;}
 esp_websocket_client_handle_t esp_websocket_client_init(const esp_websocket_client_config_t *c) {
-    assert(!locked && !strcmp(c->uri,"ws://fmo.test:8080/audio") && c->buffer_size==1024 && c->task_stack==4096);
+    snprintf(captured_uri,sizeof(captured_uri),"%s",c->uri);
+    assert(!locked && c->buffer_size==1024 && c->task_stack==4096);
     assert(c->network_timeout_ms==10000 && c->ping_interval_sec==10 && c->disable_pingpong_discon);
     if(mode>0)assert(wifi_ps==WIFI_PS_NONE);
     ++create_calls;if(init_fail){--init_fail;return NULL;}fake_client.generation++;return &fake_client;
@@ -245,6 +248,11 @@ int main(void) {
     init_fail=1;assert(start_stream(&client)==ESP_ERR_NO_MEM && !client && !destroys);
     register_fail=1;assert(start_stream(&client)==ESP_FAIL && !client && destroys==1);
     register_fail=0;start_fail=1;assert(start_stream(&client)==ESP_FAIL && !client && destroys==2);
+    start_fail=0;assert(start_stream(&client)==ESP_OK);
+    assert(!strcmp(captured_uri,"ws://fmo.test:8080/audio"));stop_stream(&client);
+    target_endpoint=(fmo_endpoint_t){.host="office.local",.port=9090};
+    assert(start_stream(&client)==ESP_OK);
+    assert(!strcmp(captured_uri,"ws://office.local:9090/audio"));stop_stream(&client);
     for(int scenario=1;scenario<=5;++scenario) {
         reset_test(scenario);
         if(scenario==2)init_fail=2;

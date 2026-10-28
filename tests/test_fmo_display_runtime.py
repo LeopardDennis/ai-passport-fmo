@@ -53,7 +53,7 @@ static fmo_snapshot_t next_snapshot;
 static char trace[100];
 static void mark(char c) { size_t n=strlen(trace); assert(n+1<sizeof(trace)); trace[n]=c; trace[n+1]=0; }
 static uint64_t monotonic_ms(void) { return clock_ms; }
-static bool fmo_network_request_stations(uint32_t start) { (void)start; ++requests; return true; }
+static bool fmo_network_request_stations(fmo_station_category_t category, uint32_t start) { (void)category; (void)start; ++requests; return true; }
 static bool fmo_network_switch_station(uint32_t uid) {return uid != 0;}
 static void fmo_network_request_setup(void) { ++setups; }
 static bool fmo_network_get_saved_wifi(fmo_wifi_list_t *list) {
@@ -162,15 +162,30 @@ int main(void) {
     s_fmo_queue=1; s_input_queue=2; has_snapshot=true;
     ui_tick(NULL); assert(!panel_dark && !s_state.speaking && s_speech_activity==1);
     key(BSP_BTN_UP, BSP_BTN_CLICK); assert(s_controls.volume==70 && audio_volume==70);
+    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(requests==0 && s_controls.view==FMO_VIEW_STATION_MENU);
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(requests==1 && s_controls.audio_enabled && audio_volume==70);
     assert(s_controls.view==FMO_VIEW_STATIONS && s_controls.stations.status==FMO_STATIONS_LOADING);
     key(BSP_BTN_UP, BSP_BTN_LONG); assert(s_controls.view==FMO_VIEW_STATIONS && requests==1);
+    key(BSP_BTN_OK, BSP_BTN_LONG); assert(s_controls.view==FMO_VIEW_STATION_MENU);
+    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.view==FMO_VIEW_STATION_MENU && requests==1);
     key(BSP_BTN_OK, BSP_BTN_LONG); assert(s_controls.view==FMO_VIEW_MONITOR);
-    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.view==FMO_VIEW_STATIONS && requests==1);
+    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.view==FMO_VIEW_STATION_MENU);
     assert(update_display(clock_ms+600000)); // Browsing keeps the display awake.
     next_snapshot.state=s_state; next_snapshot.stations.status=FMO_STATIONS_READY;
+    next_snapshot.stations.category=FMO_STATION_PINNED;
     next_snapshot.stations.count=6; next_snapshot.stations.has_next=true;
     has_snapshot=true;ui_tick(NULL);
+    assert(s_controls.view==FMO_VIEW_STATION_MENU); // Late completion does not force entry.
+    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.view==FMO_VIEW_STATIONS && requests==2);
+    has_snapshot=true;ui_tick(NULL);
+    next_snapshot.stations.category=FMO_STATION_ALL;
+    next_snapshot.stations.status=FMO_STATIONS_SUCCESS;
+    has_snapshot=true;ui_tick(NULL);
+    assert(s_controls.view==FMO_VIEW_STATIONS && s_controls.stations.category==FMO_STATION_PINNED);
+    assert(s_controls.stations.status==FMO_STATIONS_READY); // Ignore stale snapshots, even success.
+    next_snapshot.stations.category=FMO_STATION_PINNED;
+    next_snapshot.stations.status=FMO_STATIONS_READY;
+    requests=1;
     s_controls.selection=4;
     key(BSP_BTN_DOWN,BSP_BTN_LONG);
     assert(requests==2 && s_controls.stations.start==6 && s_controls.selection==4);

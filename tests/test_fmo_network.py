@@ -33,7 +33,7 @@ def run():
     header = (ROOT / "main/fmo_network.h").read_text()
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
-        "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_station_list", "parse_local_position", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_local_position", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
+        "start_target_socket", "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_station_list", "parse_local_position", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_local_position", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
     functions += "\n" + source[source.index("void fmo_network_request_retry(void)"):source.index("bool fmo_network_get_saved_wifi(")]
     functions += "\n" + source[source.index("bool fmo_network_location_snapshot("):]
     preamble = r'''
@@ -76,8 +76,13 @@ static uint64_t now_ms(void) { return clock_ms; }
 #define pdMS_TO_TICKS(x) (x)
 #define pdTRUE 1
 #define ESP_OK 0
+#define ESP_ERR_INVALID_ARG -2
 #define ESP_LOGE(...) ((void)0)
 typedef int esp_err_t;
+static fmo_endpoint_t target_endpoint={.host="home.local",.port=8080};
+static char target_uri[160];
+static void fmo_provision_get_endpoint(fmo_endpoint_t *out){*out=target_endpoint;}
+static int start_socket(fmo_socket_t *socket,const char *uri){assert(socket);snprintf(target_uri,sizeof(target_uri),"%s",uri);return 0;}
 typedef struct { bool wait_for_sync; const char *server; } esp_sntp_config_t;
 #define ESP_NETIF_SNTP_DEFAULT_CONFIG(host) {true,host}
 static int clock_inits, clock_restarts, clock_fail;
@@ -171,14 +176,66 @@ static void query(void) { s_query_pending = true; s_query_revision = s_speaker_r
 #define CHANNEL42 "{\"type\":\"station\",\"subType\":\"getCurrentResponse\",\"data\":{\"uid\":42,\"name\":\"安吉FMO中继\"}}"
 #define CHANNEL43 "{\"type\":\"station\",\"subType\":\"getCurrentResponse\",\"data\":{\"uid\":43,\"name\":\"上海\"}}"
 #define START "{\"type\":\"qso\",\"subType\":\"callsign\",\"data\":{\"callsign\":\"BG5ESN\",\"isSpeaking\":true,\"grid\":\"PM01\"}}"
-static void test_station_total(void) {
+static void test_station_categories(void) {
+    const char *queries[]={"getListRange","getPinnedList","getActiveList"};
+    const char *responses[]={"getListResponse","getPinnedListResponse","getActiveListResponse"};
+    for(unsigned category=0;category<FMO_STATION_CATEGORY_COUNT;++category) {
+        memset(&s_snapshot,0,sizeof(s_snapshot));s_query_pending=false;short_send=0;
+        s_control_socket.client=1;clock_ms=4000000;
+        post_link(FMO_UPDATE_WIFI,true);post_link(FMO_UPDATE_EVENTS_LINK,true);
+        post_link(FMO_UPDATE_CONTROL_LINK,true);
+        query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+        assert(fmo_stations_load(&s_snapshot.stations,(fmo_station_category_t)category,0,clock_ms));
+        assert(!request_station_control());
+        assert(strstr(last_request,queries[category]) && strstr(last_request,"\"count\":7"));
+        char reply[1024];
+        for(unsigned other=0;other<FMO_STATION_CATEGORY_COUNT;++other) {
+            snprintf(reply,sizeof(reply),"{\"type\":\"station\",\"subType\":\"%s\",\"data\":{\"count\":99,\"list\":[{\"uid\":43,\"name\":\"Test\"}]},\"code\":0}",responses[other]);
+            parse_fmo_message(FMO_SOCKET_EVENTS,reply);
+            assert(s_snapshot.stations.request==FMO_STATION_LIST_WAIT);
+            if(other!=category) {
+                parse_fmo_message(FMO_SOCKET_CONTROL,reply);
+                assert(s_snapshot.stations.request==FMO_STATION_LIST_WAIT && !s_snapshot.stations.count);
+            }
+        }
+        snprintf(reply,sizeof(reply),"{\"type\":\"station\",\"subType\":\"%s\",\"data\":{\"count\":99,\"list\":[{\"uid\":43,\"name\":\"Test\"}]},\"code\":0}",responses[category]);
+        parse_fmo_message(FMO_SOCKET_CONTROL,reply);
+        assert(s_snapshot.stations.count==1 && s_snapshot.stations.total==1);
+        assert(s_snapshot.stations.request==FMO_STATION_NONE && !s_snapshot.stations.audio_paused);
+        assert(s_snapshot.state.channel_uid==42);
+        assert(fmo_stations_switch(&s_snapshot.stations,43,42,clock_ms));
+        parse_fmo_message(FMO_SOCKET_CONTROL,reply);
+        assert(s_snapshot.stations.request==FMO_STATION_SWITCH_QUEUED);
+        fmo_stations_disconnect(&s_snapshot.stations);
+        assert(fmo_stations_load(&s_snapshot.stations,(fmo_station_category_t)category,0,clock_ms));
+        request_station_control();
+        snprintf(reply,sizeof(reply),"{\"type\":\"station\",\"subType\":\"%s\",\"data\":{\"list\":[]},\"code\":0}",responses[category]);
+        parse_fmo_message(FMO_SOCKET_CONTROL,reply);
+        assert(s_snapshot.stations.status==FMO_STATIONS_EMPTY && s_snapshot.stations.total_known);
+        assert(fmo_stations_load(&s_snapshot.stations,(fmo_station_category_t)category,0,clock_ms));
+        request_station_control();
+        snprintf(reply,sizeof(reply),"{\"type\":\"station\",\"subType\":\"%s\",\"data\":{\"list\":[]},\"code\":-1}",responses[category]);
+        parse_fmo_message(FMO_SOCKET_CONTROL,reply);
+        assert(s_snapshot.stations.status==FMO_STATIONS_LOAD_FAILED);
+        assert(s_snapshot.state.channel_valid && s_snapshot.state.channel_uid==42);
+        assert(fmo_stations_load(&s_snapshot.stations,(fmo_station_category_t)category,0,clock_ms));
+        request_station_control();clock_ms+=FMO_STATION_TIMEOUT_MS;
+        assert(!prepare_station_work() && !s_control_socket.client);
+        parse_fmo_message(FMO_SOCKET_CONTROL,reply);
+        assert(s_snapshot.stations.status==FMO_STATIONS_LOAD_FAILED && !s_snapshot.stations.count);
+    }
+    puts("FMO station categories: PASS (query routing, isolated replies, empty/error, switch ownership, timeout)");
+}
+static void test_station_total(fmo_station_category_t category) {
     memset(&s_snapshot,0,sizeof(s_snapshot));s_query_pending=false;short_send=0;
     s_control_socket.client=1;clock_ms=3000000;
     post_link(FMO_UPDATE_WIFI,true);post_link(FMO_UPDATE_EVENTS_LINK,true);
     post_link(FMO_UPDATE_CONTROL_LINK,true);
     query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
-    assert(fmo_stations_load(&s_snapshot.stations,0,clock_ms));
+    assert(fmo_stations_load(&s_snapshot.stations,category,0,clock_ms));
     fmo_stations_begin_count(&s_snapshot.stations,clock_ms);
+    const char *responses[]={"getListResponse","getPinnedListResponse","getActiveListResponse"};
+    char reply[256];
     unsigned probes=0;
     while(s_snapshot.stations.counting) {
         uint32_t index=s_snapshot.stations.count_probe;
@@ -186,9 +243,8 @@ static void test_station_total(void) {
         assert(s_snapshot.stations.request==FMO_STATION_LIST_WAIT);
         assert(strstr(last_request,"\"count\":1"));
         int before=sends;assert(!request_station_control() && sends==before);
-        const char *reply=index<162 ?
-            "{\"type\":\"station\",\"subType\":\"getListResponse\",\"data\":{\"count\":999,\"list\":[{\"uid\":42,\"name\":\"probe\"}]}}" :
-            "{\"type\":\"station\",\"subType\":\"getListResponse\",\"data\":{\"count\":999,\"list\":[]}}";
+        snprintf(reply,sizeof(reply),"{\"type\":\"station\",\"subType\":\"%s\",\"data\":{\"count\":999,\"list\":%s}}",
+            responses[category],index<162 ? "[{\"uid\":42,\"name\":\"probe\"}]" : "[]");
         parse_fmo_message(FMO_SOCKET_EVENTS,reply);
         assert(s_snapshot.stations.request==FMO_STATION_LIST_WAIT);
         parse_fmo_message(FMO_SOCKET_CONTROL,reply);
@@ -199,10 +255,11 @@ static void test_station_total(void) {
     assert(!request_station_control());
     assert(strstr(last_request,"\"start\":0") && strstr(last_request,"\"count\":7"));
     // An outdated total is corrected by a shorter actual final page.
-    parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"station\",\"subType\":\"getListResponse\",\"data\":{\"list\":[{\"uid\":42,\"name\":\"only\"}]}}");
+    snprintf(reply,sizeof(reply),"{\"type\":\"station\",\"subType\":\"%s\",\"data\":{\"list\":[{\"uid\":42,\"name\":\"only\"}]}}",responses[category]);
+    parse_fmo_message(FMO_SOCKET_CONTROL,reply);
     assert(published.stations.count==1 && published.stations.total==1);
     assert(published.stations.total_known && published.stations.request==FMO_STATION_NONE);
-    assert(fmo_stations_load(&s_snapshot.stations,0,clock_ms));
+    assert(fmo_stations_load(&s_snapshot.stations,category,0,clock_ms));
     fmo_stations_begin_count(&s_snapshot.stations,clock_ms);
     clock_ms+=FMO_STATION_COUNT_BUDGET_MS;
     assert(!request_station_control());
@@ -361,6 +418,11 @@ static void test_metadata_recovery(void) {
     puts("FMO metadata recovery: PASS (cold boot, retries, healthy links, manual retry, offline/setup, station reconciliation)");
 }
 int main(void) {
+    assert(start_target_socket(&s_events_socket,"events")==0 && !strcmp(target_uri,"ws://home.local:8080/events"));
+    assert(start_target_socket(&s_control_socket,"ws")==0 && !strcmp(target_uri,"ws://home.local:8080/ws"));
+    target_endpoint=(fmo_endpoint_t){.host="office.local",.port=9090};
+    assert(start_target_socket(&s_events_socket,"events")==0 && !strcmp(target_uri,"ws://office.local:9090/events"));
+    assert(start_target_socket(&s_control_socket,"ws")==0 && !strcmp(target_uri,"ws://office.local:9090/ws"));
     fmo_update_t link = {.type=FMO_UPDATE_WIFI, .connected=true};
     strcpy(link.text,"actual-wifi");post_update(&link);assert(!strcmp(published.connected_ssid,"actual-wifi")); link.type=FMO_UPDATE_EVENTS_LINK; post_update(&link);
     link.type=FMO_UPDATE_CONTROL_LINK; post_update(&link);
@@ -718,7 +780,7 @@ int main(void) {
     post_link(FMO_UPDATE_WIFI,true); post_link(FMO_UPDATE_EVENTS_LINK,true);
     post_link(FMO_UPDATE_CONTROL_LINK,true);
     query(); parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
-    assert(fmo_stations_load(&s_snapshot.stations,0,clock_ms));
+    assert(fmo_stations_load(&s_snapshot.stations,FMO_STATION_ALL,0,clock_ms));
     query(); int before_list=sends;
     assert(!request_station_control() && sends==before_list);
     parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
@@ -783,11 +845,11 @@ int main(void) {
     parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
     assert(s_snapshot.stations.status==FMO_STATIONS_SUCCESS && !prepare_station_work());
 
-    assert(fmo_stations_load(&s_snapshot.stations,6,clock_ms));
+    assert(fmo_stations_load(&s_snapshot.stations,FMO_STATION_ALL,6,clock_ms));
     assert(!request_station_control());
     parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"station\",\"subType\":\"getListResponse\",\"data\":{\"list\":[{\"uid\":1.5,\"name\":\"bad\"}]}}");
     assert(s_snapshot.stations.status==FMO_STATIONS_LOAD_FAILED && !s_snapshot.stations.count);
-    assert(fmo_stations_load(&s_snapshot.stations,6,clock_ms));
+    assert(fmo_stations_load(&s_snapshot.stations,FMO_STATION_ALL,6,clock_ms));
     assert(!request_station_control());clock_ms+=FMO_STATION_TIMEOUT_MS;
     assert(!prepare_station_work() && !s_control_socket.client);
     parse_fmo_message(FMO_SOCKET_CONTROL,list);
@@ -812,8 +874,9 @@ int main(void) {
     assert(!fmo_network_location_snapshot(&place_request));
     atomic_store(&s_setup_requested,false);
     test_metadata_recovery();
-    test_station_total();
+    for(unsigned c=0;c<FMO_STATION_CATEGORY_COUNT;++c) test_station_total((fmo_station_category_t)c);
     test_local_position();
+    test_station_categories();
     puts("FMO network parser: PASS (cross-server flags/color lifecycle, recent-two history/sorting/isolation, large history receive/fragmentation, local profile exclusion, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");
 }
 '''
