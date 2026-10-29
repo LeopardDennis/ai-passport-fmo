@@ -33,8 +33,11 @@ current or last-heard speaker's short place name, bearing, and distance, in
 that order. Common Chinese administrative names are shortened for display,
 for example Inner Mongolia without its autonomous-region suffix, or Foshan
 without its city suffix. Place names include city plus district/county when
-available, with the city first. The cache format is versioned so older
-single-region labels are refreshed.
+available, with the city first. Chinese subdistrict, township, village and community
+names are excluded even when returned in city/county/district fields. Municipality
+names are recognized with or without their city suffix; missing parent cities are
+not inferred from district names. The cache format is versioned so older
+single-region or street-level labels are refreshed.
 The original geocoder/cache value is retained. The 216 px row reserves room for
 the complete bearing and distance. Overflowing place names scroll back and forth
 at 30 pixels per second, with a one-second pause at both ends; bearing and distance
@@ -42,7 +45,7 @@ stay fixed. Short names remain still. Scrolling pauses while the display sleeps
 and stops on menu pages. Unchanged snapshots do not restart it.
 Missing or pending place names show `--`. The place belongs to the live/last
 speaker, independently of the two history records. The callsign keeps its
-fixed 32 px size and scrolls if needed.
+fixed 32 px size without scrolling; only the grid font adapts to the remaining width.
 
 The origin is the coordinate configured on the connected FMO, read through
 `config/getCordinate` on `/ws` after the channel is confirmed, then at most once

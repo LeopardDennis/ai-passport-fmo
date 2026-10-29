@@ -50,6 +50,7 @@ static char requested[256];
 static fmo_monitor_state_t current;
 static fmo_location_entry_t disk[32];
 static bool disk_valid[32];
+static bool legacy_cache;
 static int esp_crt_bundle_attach(void *x) {(void)x; return 0;}
 static int64_t esp_timer_get_time(void) {return clock_ms*1000;}
 static esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *c) {
@@ -70,7 +71,12 @@ static int esp_http_client_read(void *c,char *out,int n) {
  return (int)count;
 }
 static void esp_http_client_cleanup(void *c) {(void)c;++cleanups;}
-static int nvs_open(const char *s,int mode,int *h) {(void)s;(void)mode;*h=1;return 0;}
+static int nvs_open(const char *s,int mode,int *h) {
+ assert(!strcmp(s,"fmo_places_v3"));
+ if(mode==NVS_READONLY && legacy_cache)return -1;
+ if(mode==NVS_READWRITE && legacy_cache) {legacy_cache=false;memset(disk_valid,0,sizeof(disk_valid));}
+ *h=1;return 0;
+}
 static int nvs_get_blob(int h,const char *k,void *out,size_t *size) {
  (void)h;unsigned slot=(unsigned)atoi(k+1);
  if(!disk_valid[slot])return -1;assert(*size==sizeof(disk[slot]));memcpy(out,&disk[slot],*size);return 0;
@@ -101,7 +107,7 @@ static int xTaskCreate(void(*f)(void*),const char *name,int stack,void *arg,int 
 tests = r"""
 static void reset(void) {
  memset(&cache,0,sizeof(cache)); memset(&current,0,sizeof(current));
- memset(disk_valid,0,sizeof(disk_valid));
+ memset(disk_valid,0,sizeof(disk_valid));legacy_cache=false;
  clock_ms=applied_ms=0;memset(open_times,0,sizeof(open_times));
  opens=cleanups=saves=reads=offset=cycles=0;cycle_limit=4;cycle_hook=NULL;
  open_error=truncate_response=oversize=slow=change_speaker=slow_connect=0;status=200;heap=largest_block=100000;buffered_complete=false;
@@ -136,6 +142,14 @@ int main(void) {
  assert(opens==1 && saves==1 && !strcmp(current.location,"佛山市"));
  memset(&cache,0,sizeof(cache));current.location[0]=0;cycles=0;heap=0;run_worker();
  assert(opens==1 && saves==1 && !strcmp(current.location,"佛山市")); // Persistent cache, no TLS heap.
+ // Old labels may include streets; a new namespace must force a fresh lookup.
+ reset();legacy_cache=true;
+ fmo_position_t old_position;assert(fmo_location_grid(current.grid,&old_position));
+ disk[0]=(fmo_location_entry_t){.position=old_position,.name="河西区 下瓦房街道"};disk_valid[0]=true;
+ body="{\"features\":[{\"properties\":{\"state\":\"天津\",\"city\":\"河西区\",\"district\":\"下瓦房街道\"}}]}";
+ run_worker();assert(opens==1 && saves==1 && !strcmp(current.location,"天津市 河西区"));
+ memset(&cache,0,sizeof(cache));current.location[0]=0;cycles=0;heap=0;run_worker();
+ assert(opens==1 && saves==1 && !strcmp(current.location,"天津市 河西区"));
  reset();change_speaker=1;run_worker();assert(saves==1 && !current.location[0]);
  reset();status=503;run_worker();assert(opens==1 && !saves && !current.location[0]);
  // Measured device idle heap used to be blocked forever by the 64 KiB gate.

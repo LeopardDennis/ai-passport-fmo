@@ -35,7 +35,7 @@ static uint64_t milliseconds(void) { return esp_timer_get_time() / 1000; }
 static void cache_load(void)
 {
     nvs_handle_t handle;
-    if (nvs_open("fmo_places_v2", NVS_READONLY, &handle) != ESP_OK) return;
+    if (nvs_open("fmo_places_v3", NVS_READONLY, &handle) != ESP_OK) return;
     for (unsigned i = 0; i < FMO_LOCATION_CACHE_SIZE; ++i) {
         char key[8];
         snprintf(key, sizeof(key), "p%02u", i);
@@ -51,7 +51,7 @@ static void cache_load(void)
 static void cache_save(unsigned slot)
 {
     nvs_handle_t handle;
-    if (nvs_open("fmo_places_v2", NVS_READWRITE, &handle) != ESP_OK) return;
+    if (nvs_open("fmo_places_v3", NVS_READWRITE, &handle) != ESP_OK) return;
     char key[8];
     snprintf(key, sizeof(key), "p%02u", slot);
     esp_err_t err = nvs_set_blob(handle, key, &cache.entries[slot], sizeof(cache.entries[slot]));

@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Exclude Chinese subdistricts, townships, villages and communities from speaker place names even when Photon returns them as city/county/district fields. Recognize municipalities with or without the city suffix, preserve known districts when parent cities are missing, and refresh old place caches. Add parser and cache/reboot regressions for Hexi/Xiawafang and municipality field variants.
+
 - Keep callsigns static at the original 32 px with a 4 px grid gap; shrink only the grid font to keep six-character alphanumeric callsigns and their grids on one line without scrolling or ellipsis. Disable QSO callsign scrolling and verify the reported BA4SML/OM93nm layout and wide callsigns across animation ticks. Use small pre-rasterized Noto grid fonts without transformed display layers.
 
 - Save the FMO host and port with each Wi-Fi profile, submit both together after verified DHCP, and restore the matching destination for events, control and audio after switching networks. Migrate legacy global addresses, refill the setup form when selecting saved networks, and cover reboot, migration, deletion and storage-failure behavior.

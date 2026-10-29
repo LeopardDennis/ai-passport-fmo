@@ -98,6 +98,19 @@ int main(void)
         {"{\"city\":\"佛山市\",\"county\":\"佛山市\"}", "佛山市"},
         {"{\"county\":\"南海区\"}", "南海区"},
         {"{\"state\":\"内蒙古自治区\"}", "内蒙古自治区"},
+        {"{\"city\":\"河西区\",\"district\":\"下瓦房街道\"}", "河西区"},
+        {"{\"state\":\"天津\",\"city\":\"河西区\",\"district\":\"下瓦房街道\"}", "天津市 河西区"},
+        {"{\"state\":\"天津市\",\"county\":\"天津\",\"city\":\"河西区\",\"district\":\"下瓦房街道\"}", "天津市 河西区"},
+        {"{\"county\":\"天津\",\"city\":\"河西\",\"district\":\"下瓦房街道\"}", "天津市 河西"},
+        {"{\"state\":\"天津\",\"city\":\"天津市\",\"district\":\"河西区\"}", "天津市 河西区"},
+        {"{\"state\":\"北京\",\"city\":\"朝阳区\",\"district\":\"三里屯街道\"}", "北京市 朝阳区"},
+        {"{\"state\":\"上海\",\"city\":\"黄浦区\",\"district\":\"外滩街道\"}", "上海市 黄浦区"},
+        {"{\"state\":\"重庆\",\"city\":\"渝中区\",\"district\":\"解放碑街道\"}", "重庆市 渝中区"},
+        {"{\"city\":\"佛山市\",\"district\":\"桂城街道\"}", "佛山市"},
+        {"{\"city\":\"桂城街道\",\"county\":\"佛山市\"}", "佛山市"},
+        {"{\"city\":\"佛山市\",\"county\":\"狮山镇\",\"district\":\"罗村街道\"}", "佛山市"},
+        {"{\"state\":\"广东省\",\"city\":\"狮山镇\"}", "广东省"},
+        {"{\"city\":\"Paris\",\"district\":\"Quartier Saint-Merri\"}", "Paris Quartier Saint-Merri"},
     };
     for (unsigned i=0;i<sizeof(places)/sizeof(places[0]);++i) {
         char json[512];snprintf(json,sizeof(json),"{\"features\":[{\"properties\":%s}]}",places[i][0]);
@@ -108,6 +121,12 @@ int main(void)
     fmo_location_short_name("New York Kings County",name,sizeof(name));assert(!strcmp(name,"New York Kings County"));
 
     assert(!fmo_location_parse_response("{\"features\":[{\"properties\":{\"name\":\"商场\"}}]}",name,sizeof(name)));
+    const char *local_places[] = {"下瓦房街道", "下瓦房街道办事处", "狮山镇", "某某乡", "某某苏木", "某某村", "某某社区"};
+    for (unsigned i = 0; i < sizeof(local_places) / sizeof(local_places[0]); ++i) {
+        char json[512];
+        snprintf(json, sizeof(json), "{\"features\":[{\"properties\":{\"district\":\"%s\"}}]}", local_places[i]);
+        assert(!fmo_location_parse_response(json, name, sizeof(name)) && !name[0]);
+    }
     const char *bad_json[]={"{}","[]","null","{","{\"features\":[]}","{}trailing","{\"features\":[{\"properties\":{\"city\":\"A\\u0000B\"}}]}"};
     for(unsigned i=0;i<sizeof(bad_json)/sizeof(bad_json[0]);++i) assert(!fmo_location_parse_response(bad_json[i],name,sizeof(name)));
 
