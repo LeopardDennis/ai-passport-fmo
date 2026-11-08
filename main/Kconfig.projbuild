@@ -34,7 +34,7 @@ config FMO_BACKLIGHT
 config FMO_VOLUME
     int "Initial conversation volume percent"
     range 0 100
-    default 80
+    default 50
     help
         Auto-play received FMO PCM audio after connection. UP/DOWN changes volume
         by 10 percent; short OK opens stations. Long OK opens network settings

@@ -25,6 +25,10 @@ All enabled sockets reconnect automatically. No FMO device certificate or privat
 is copied to AI Passport because the firmware observes the local FMO interface;
 it does not act as a virtual FMO radio or connect directly to an FMO MQTT server.
 
+The history frame has no QSO title. A two-person icon and online-user count appear directly below the station name, right-aligned beside the contact status. Read `serverUsers/getListPage` (`pageSize: 1`) every 15 seconds and display `data.total`. Unsupported/denied queries, disconnection, switching, timeout or data older than 30 seconds show a placeholder. Timed-out or rejected queries remain disabled until control reconnection. Availability was verified on an administrator-role FMO; other roles depend on device permissions.
+
+The row below the contact frame shows cached favorite and active station counts. Each category refreshes every 60 seconds with at least three seconds between category batches. Counts use bounded one-row probes rather than the response page count. Browsing, switching and setup take priority. Unknown, disconnected or two-minute-old values show placeholders; confirmed empty lists show zero. A timed-out count drains the control connection once, then disables that category until Wi-Fi reconnects.
+
 ## Speaker location
 
 The gray slot beside the callsign always displays the Maidenhead grid code.
@@ -33,7 +37,7 @@ current or last-heard speaker's short place name, bearing, and distance, in
 that order. Common Chinese administrative names are shortened for display,
 for example Inner Mongolia without its autonomous-region suffix, or Foshan
 without its city suffix. Place names include city plus district/county when
-available, with the city first. Chinese subdistrict, township, village and community
+available, with the city first. If no usable district/county is present, show province plus city instead. Mixed Chinese/Mongolian labels retain their Chinese prefix. Chinese subdistrict, township, village and community
 names are excluded even when returned in city/county/district fields. Municipality
 names are recognized with or without their city suffix; missing parent cities are
 not inferred from district names. The cache format is versioned so older
@@ -168,7 +172,7 @@ restarts synchronization without allocating another service. An already synced
 clock continues during a network interruption, and wake-up redraws the current
 minute. Time synchronization requires access to the NTP server. Separate transmit/receive frequencies are not displayed.
 
-Conversation audio connects automatically once Wi-Fi is ready, at 80% volume
+Conversation audio connects automatically once Wi-Fi is ready, at 50% volume
 by default. Its connection and activity watchdog are independent of the channel
 and event sockets: recovering metadata does not mute or discard healthy audio. The `/audio` interface supplies 8 kHz,
 16-bit signed little-endian mono PCM; the existing ES8311/I2S driver plays it

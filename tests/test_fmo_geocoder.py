@@ -72,7 +72,7 @@ static int esp_http_client_read(void *c,char *out,int n) {
 }
 static void esp_http_client_cleanup(void *c) {(void)c;++cleanups;}
 static int nvs_open(const char *s,int mode,int *h) {
- assert(!strcmp(s,"fmo_places_v3"));
+ assert(!strcmp(s,"fmo_places_v4"));
  if(mode==NVS_READONLY && legacy_cache)return -1;
  if(mode==NVS_READWRITE && legacy_cache) {legacy_cache=false;memset(disk_valid,0,sizeof(disk_valid));}
  *h=1;return 0;

@@ -28,6 +28,10 @@ typedef struct {
     bool speaking;
     bool speaker_is_host;
     bool speaker_cross_server;
+    bool pinned_count_valid, active_count_valid;
+    uint32_t pinned_count, active_count;
+    bool online_count_valid;
+    uint32_t online_count;
     uint32_t channel_uid;
     uint64_t last_speaker_ms;
     uint64_t channel_confirmed_ms;

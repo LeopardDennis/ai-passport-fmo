@@ -89,8 +89,14 @@ int main(void)
     assert(fmo_location_parse_response("{\"features\":[{\"properties\":{\"city\":\"黄浦区\",\"state\":\"上海市\"}}]}",name,sizeof(name)));
     assert(!strcmp(name,"上海市 黄浦区"));
     assert(fmo_location_parse_response("{\"features\":[{\"properties\":{\"city\":\"佛山市\",\"state\":\"广东省\"}}]}",name,sizeof(name)));
-    assert(!strcmp(name,"佛山市"));
+    assert(!strcmp(name,"广东省 佛山市"));
     const char *places[][2] = {
+        {"{\"district\": \"城郊镇\", \"city\": \"城郊镇\", \"county\": \"临夏市\", \"state\": \"甘肃省\"}", "甘肃省 临夏市"},
+        {"{\"district\": \"西菜园街道\", \"city\": \"呼和浩特市 ᠬᠥᠬᠡᠬᠣᠲᠠ\", \"county\": \"玉泉区 ᠢᠤᠢ ᠴᠢᠤᠸᠠᠨ ᠲᠣᠭᠣᠷᠢᠭ\", \"state\": \"内蒙古自治区 ᠦᠪᠦᠷ ᠮᠣᠩᠭᠤᠯ ᠤᠨ ᠥᠪᠡᠷᠲᠡᠭᠡᠨ ᠵᠠᠰᠠᠬᠣ ᠣᠷᠣᠨ\"}", "呼和浩特市 玉泉区"},
+        {"{\"state\": \"甘肃省\", \"city\": \"临夏市\", \"county\": \"临夏市\"}", "甘肃省 临夏市"},
+        {"{\"state\": \"甘肃省\", \"county\": \"临夏市\"}", "甘肃省 临夏市"},
+        {"{\"state\": \"广东省\", \"city\": \"佛山市\", \"county\": \"南海区\"}", "佛山市 南海区"},
+
         {"{\"city\":\"佛山市\",\"county\":\"南海区\",\"district\":\"桂城街道\"}", "佛山市 南海区"},
         {"{\"city\":\"南海区\",\"county\":\"佛山市\"}", "佛山市 南海区"},
         {"{\"city\":\"上海市\",\"county\":\"上海市\",\"district\":\"黄浦区\",\"state\":\"上海市\"}", "上海市 黄浦区"},
@@ -116,6 +122,8 @@ int main(void)
         char json[512];snprintf(json,sizeof(json),"{\"features\":[{\"properties\":%s}]}",places[i][0]);
         assert(fmo_location_parse_response(json,name,sizeof(name)) && !strcmp(name,places[i][1]));
     }
+    fmo_location_short_name("甘肃省 临夏市",name,sizeof(name));assert(!strcmp(name,"甘肃 临夏"));
+    fmo_location_short_name("呼和浩特市 玉泉区",name,sizeof(name));assert(!strcmp(name,"呼和浩特 玉泉"));
     fmo_location_short_name("佛山市 南海区",name,sizeof(name));assert(!strcmp(name,"佛山 南海"));
     fmo_location_short_name("上海市 黄浦区",name,sizeof(name));assert(!strcmp(name,"上海 黄浦"));
     fmo_location_short_name("New York Kings County",name,sizeof(name));assert(!strcmp(name,"New York Kings County"));

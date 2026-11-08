@@ -28,12 +28,12 @@
 #define CHANNEL_HEIGHT 32
 #define QSO_TOP 183
 #define QSO_ROW_HEIGHT 36
-#define QSO_ROWS_TOP 29
+#define QSO_ROWS_TOP 5
 #define QSO_TEXT_HEIGHT 14
 #define QSO_TIME_OFFSET 19
 #define LOCATION_TOP 150
 #define LOCATION_HEIGHT 16
-#define AIR_TOP 98
+#define AIR_TOP 99
 #define AIR_HEIGHT 16
 #define CALLSIGN_TOP 116
 #define ACTIVITY_TOP 173
@@ -54,6 +54,8 @@ static lv_obj_t *audio_label, *link_label, *battery_label, *channel_label, *cloc
 static lv_obj_t *battery_body;
 static int last_battery = -2;
 static lv_obj_t *air_label, *callsign_label, *grid_label, *hint_label;
+static lv_obj_t *online_label;
+static char summary_text[80];
 static lv_obj_t *qso_panel, *qso_labels[FMO_HISTORY_COUNT];
 static char path_text[64], location_text[FMO_LOCATION_MAX + 4];
 static bool path_cache_valid, path_ready;
@@ -691,6 +693,74 @@ static void draw_path(lv_event_t *event)
     }
 }
 
+/* Draw a compact pair of people beside the right-aligned count. */
+static void draw_online_icon(lv_event_t *event)
+{
+    lv_obj_t *obj = lv_event_get_target(event);
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return;
+    lv_area_t bounds;
+    lv_obj_get_coords(obj, &bounds);
+    lv_point_t size;
+    lv_text_get_size(&size, lv_label_get_text(obj), &lv_font_montserrat_14,
+                     0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int x = bounds.x2 - size.x - 18;
+    lv_area_t parent;
+    lv_obj_get_coords(lv_obj_get_parent(obj), &parent);
+    int y = parent.y1 + AIR_TOP + 1;
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_color = lv_color_hex(BLACK);
+    dsc.bg_opa = LV_OPA_COVER;
+    dsc.border_color = lv_color_hex(ORANGE);
+    dsc.border_width = 1;
+    dsc.radius = LV_RADIUS_CIRCLE;
+    /* Staggered outlines: a rear person at left and a larger person in front.
+     * Black interiors keep overlapping shoulders distinct at native LCD size. */
+    const lv_area_t shapes[] = {
+        {.x1=x+1, .y1=y+1, .x2=x+5, .y2=y+5},
+        {.x1=x, .y1=y+7, .x2=x+8, .y2=y+13},
+        {.x1=x+7, .y1=y, .x2=x+12, .y2=y+5},
+        {.x1=x+5, .y1=y+7, .x2=x+15, .y2=y+13},
+    };
+    for (unsigned i = 0; i < sizeof(shapes) / sizeof(shapes[0]); ++i)
+        lv_draw_rect(lv_event_get_layer(event), &dsc, &shapes[i]);
+}
+
+/* Draw the spare row directly to preserve the 24 KiB LVGL pool budget. */
+static void draw_station_summary(lv_event_t *event)
+{
+    lv_obj_t *obj = lv_event_get_target(event);
+    lv_area_t bounds; lv_obj_get_coords(obj, &bounds);
+    const lv_font_t *font = fmo_wifi_font();
+    int first = INT32_MAX, last = INT32_MIN;
+    uint32_t index = 0;
+    while (summary_text[index]) {
+        uint32_t code = lv_text_encoded_next(summary_text, &index);
+        lv_font_glyph_dsc_t glyph;
+        if (!lv_font_get_glyph_dsc(font, &glyph, code, 0) || !glyph.box_h) continue;
+        int top = font->line_height - font->base_line - glyph.box_h - glyph.ofs_y;
+        if (top < first) first = top;
+        if (top + glyph.box_h > last) last = top + glyph.box_h;
+    }
+    if (first == INT32_MAX) return;
+    lv_area_t area = {.x1=bounds.x1+12, .x2=bounds.x1+227,
+        .y1=bounds.y1+273+(16-(last-first))/2-first};
+    area.y2 = area.y1 + font->line_height - 1;
+    lv_draw_label_dsc_t dsc; lv_draw_label_dsc_init(&dsc);
+    dsc.base.obj = obj; dsc.base.id1 = 0x53554d4d; /* SUMM */
+    dsc.font = font; dsc.color = lv_color_hex(MUTED);
+    dsc.text = summary_text; dsc.text_local = true;
+    dsc.flag = LV_TEXT_FLAG_EXPAND;
+    lv_text_get_size(&dsc.text_size, summary_text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (dsc.text_size.x > 216) {
+        dsc.letter_space = -1;
+        lv_text_get_size(&dsc.text_size, summary_text, font, -1, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    }
+    area.x1 += (216 - dsc.text_size.x) / 2;
+    area.x2 = area.x1 + dsc.text_size.x - 1;
+    lv_draw_label(lv_event_get_layer(event), &dsc, &area);
+}
+
 static void create_monitor(void)
 {
     /* Widgets are recreated after overlays; cached layout/date state must not
@@ -716,12 +786,16 @@ static void create_monitor(void)
     lv_label_set_long_mode(channel_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     center_ink(channel_label, 0, CHANNEL_HEIGHT, 'H');
     snprintf(location_text, sizeof(location_text), "--");
-    qso_panel = rect(screen, 12, QSO_TOP, 216, 107, BLACK);
+    snprintf(summary_text, sizeof(summary_text), "收藏台站 -- · 活跃台站 --");
+    lv_obj_add_event_cb(screen, draw_station_summary, LV_EVENT_DRAW_MAIN_END, NULL);
+    qso_panel = rect(screen, 12, QSO_TOP, 216, 83, BLACK);
     lv_obj_set_style_border_color(qso_panel, lv_color_hex(ORANGE), 0);
     lv_obj_set_style_border_width(qso_panel, 1, 0);
     lv_obj_set_style_radius(qso_panel, 8, 0);
-    lv_obj_t *history_title = label(qso_panel, 10, 8, 196, &fmo_channel_font, ORANGE, "QSO");
-    center_ink(history_title, 8, 16, 'H');
+    online_label = label(screen, 116, AIR_TOP, 112, &lv_font_montserrat_14, ORANGE, "--");
+    lv_obj_set_style_text_align(online_label, LV_TEXT_ALIGN_RIGHT, 0);
+    center_ink(online_label, AIR_TOP, AIR_HEIGHT, 'H');
+    lv_obj_add_event_cb(online_label, draw_online_icon, LV_EVENT_DRAW_MAIN_END, NULL);
     for (unsigned i = 0; i < FMO_HISTORY_COUNT; ++i) {
         int top = QSO_ROWS_TOP + QSO_ROW_HEIGHT * i;
         qso_labels[i] = label(qso_panel, 10, top, 196,
@@ -734,7 +808,7 @@ static void create_monitor(void)
     snprintf(path_text, sizeof(path_text), "--° --  -- km");
     lv_obj_add_event_cb(screen, draw_path, LV_EVENT_DRAW_MAIN_END, NULL);
     lv_obj_add_event_cb(qso_panel, draw_qso_times, LV_EVENT_DRAW_MAIN_END, NULL);
-    air_label = label(screen, 12, AIR_TOP, 216, &fmo_channel_font, MUTED, "等待电台发言");
+    air_label = label(screen, 12, AIR_TOP, 100, &fmo_channel_font, MUTED, "等待电台发言");
     center_ink(air_label, AIR_TOP, AIR_HEIGHT, 'H');
     callsign_label = label(screen, 12, CALLSIGN_TOP, 216, &fmo_callsign_bold_32, WHITE, "--");
     lv_label_set_long_mode(callsign_label, LV_LABEL_LONG_CLIP);
@@ -818,6 +892,9 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
                  "数据清理失败 请重试" : !strcmp(error, "SETUP SAVE FAILED") ?
                  "配网设置保存失败" : "网络启动失败 请重试";
     }
+    lv_obj_set_width(air_label, error[0] ? 216 : 100);
+    if (error[0]) lv_obj_add_flag(online_label, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(online_label, LV_OBJ_FLAG_HIDDEN);
     if (text(air_label, air)) center_ink(air_label, AIR_TOP, AIR_HEIGHT, 'H');
     color(air_label, speaking || setup ? ORANGE : MUTED);
     bool call_changed = text(callsign_label, call);
@@ -894,6 +971,22 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         callsign_layout_valid = true;
         callsign_setup = setup;
     }
+    char summary[80], pinned[16] = "--", active[16] = "--";
+    if (!setup && !error[0] && s->wifi_connected && s->control_connected) {
+        if (s->pinned_count_valid) snprintf(pinned, sizeof(pinned), "%lu", (unsigned long)s->pinned_count);
+        if (s->active_count_valid) snprintf(active, sizeof(active), "%lu", (unsigned long)s->active_count);
+    }
+    snprintf(summary, sizeof(summary), "收藏台站 %s · 活跃台站 %s", pinned, active);
+    if (strcmp(summary_text, summary)) {
+        snprintf(summary_text, sizeof(summary_text), "%s", summary);
+        lv_obj_invalidate(monitor_content);
+    }
+    char online[40];
+    if (!setup && !error[0] && s->wifi_connected && s->control_connected &&
+        s->channel_valid && s->online_count_valid)
+        snprintf(online, sizeof(online), "%lu", (unsigned long)s->online_count);
+    else snprintf(online, sizeof(online), "--");
+    if (text(online_label, online)) center_ink(online_label, AIR_TOP, AIR_HEIGHT, 'H');
     bool history_online = !setup && !error[0] && s->wifi_connected && s->events_connected;
     for (unsigned i = 0; i < FMO_HISTORY_COUNT; ++i) {
         bool present = history_online && i < s->history.count;

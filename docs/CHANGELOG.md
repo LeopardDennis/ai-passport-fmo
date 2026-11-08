@@ -6,6 +6,14 @@
 
 ## Unreleased
 
+- Show cached favorite and active station counts below the contact history frame. Stagger bounded background counts, refresh each category every 60 seconds, prioritize interactive requests and pause during setup/switching. Show placeholders for unknown or stale results; quarantine timed-out replies without repeatedly reconnecting unsupported endpoints.
+
+- Set the default startup conversation volume to 50%.
+
+- Use province plus city when no usable district/county is supplied, so the reported Linxia location includes Gansu. Keep Chinese prefixes of mixed Chinese/Mongolian place fields to avoid missing glyphs, and refresh old location caches. Cover both reported grid lookup structures.
+
+- Replace the QSO title with a two-person icon and online-user count below the station name, right-aligned beside the contact status; retain both contact rows in the shortened history frame. Read serverUsers/getListPage total every 15 seconds; isolate optional replies and clear unavailable, stale or disconnected counts.
+
 - Exclude Chinese subdistricts, townships, villages and communities from speaker place names even when Photon returns them as city/county/district fields. Recognize municipalities with or without the city suffix, preserve known districts when parent cities are missing, and refresh old place caches. Add parser and cache/reboot regressions for Hexi/Xiawafang and municipality field variants.
 
 - Keep callsigns static at the original 32 px with a 4 px grid gap; shrink only the grid font to keep six-character alphanumeric callsigns and their grids on one line without scrolling or ellipsis. Disable QSO callsign scrolling and verify the reported BA4SML/OM93nm layout and wide callsigns across animation ticks. Use small pre-rasterized Noto grid fonts without transformed display layers.

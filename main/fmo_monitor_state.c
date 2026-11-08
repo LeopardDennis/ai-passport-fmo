@@ -26,6 +26,7 @@ void fmo_monitor_set_wifi(fmo_monitor_state_t *state, bool connected)
     if (!state) return;
     state->wifi_connected = connected;
     if (!connected) {
+        state->online_count_valid = false;
         state->channel_valid = false;
         memset(&state->history, 0, sizeof(state->history));
         state->events_connected = false;
@@ -49,6 +50,7 @@ void fmo_monitor_set_events(fmo_monitor_state_t *state, bool connected)
     if (!state) return;
     state->events_connected = connected;
     if (!connected) {
+        state->online_count_valid = false;
         memset(&state->history, 0, sizeof(state->history));
         state->speaking = false;
         state->speaker_cross_server = false;
@@ -61,6 +63,7 @@ void fmo_monitor_set_control(fmo_monitor_state_t *state, bool connected)
     if (!state) return;
     state->control_connected = connected;
     if (!connected) {
+        state->online_count_valid = false;
         state->local_position_valid = false;
         state->channel_valid = false;
     }
@@ -68,7 +71,7 @@ void fmo_monitor_set_control(fmo_monitor_state_t *state, bool connected)
 
 void fmo_monitor_invalidate_channel(fmo_monitor_state_t *state)
 {
-    if (state) state->channel_valid = false;
+    if (state) { state->channel_valid = false; state->online_count_valid = false; }
 }
 
 void fmo_monitor_set_channel(fmo_monitor_state_t *state, uint32_t uid,
@@ -76,6 +79,7 @@ void fmo_monitor_set_channel(fmo_monitor_state_t *state, uint32_t uid,
 {
     if (!state) return;
     if (state->channel_uid != uid) {
+        state->online_count_valid = false;
         state->speaking = false;
         state->speaker_cross_server = false;
         state->speaker_is_host = false;

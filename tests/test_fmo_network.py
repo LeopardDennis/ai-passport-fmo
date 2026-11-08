@@ -33,7 +33,7 @@ def run():
     header = (ROOT / "main/fmo_network.h").read_text()
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
-        "start_target_socket", "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "parse_station_list", "parse_local_position", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_local_position", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
+        "start_target_socket", "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "finish_station_summary", "request_station_summary", "parse_station_list", "parse_local_position", "parse_online_count", "request_online_count", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_local_position", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
     functions += "\n" + source[source.index("void fmo_network_request_retry(void)"):source.index("bool fmo_network_get_saved_wifi(")]
     functions += "\n" + source[source.index("bool fmo_network_location_snapshot("):]
     preamble = r'''
@@ -69,6 +69,12 @@ static bool s_station_draining, s_station_prepared;
 static fmo_link_recovery_t s_events_recovery, s_control_recovery;
 static uint32_t s_speaker_revision, s_query_revision;
 static uint64_t clock_ms = 10000, s_query_ms;
+static fmo_stations_t s_summary;
+static bool s_summary_disabled[2];
+static uint64_t s_summary_due[2], s_summary_updated[2];
+static bool s_online_pending;
+static uint64_t s_online_query_ms, s_online_next_ms, s_online_updated_ms;
+static uint32_t s_online_channel;
 static bool s_position_pending;
 static uint64_t s_position_query_ms, s_position_next_ms;
 static bool s_clock_initialized, s_clock_online;
@@ -266,6 +272,100 @@ static void test_station_total(fmo_station_category_t category) {
     assert(!s_snapshot.stations.counting && !s_snapshot.stations.total_known);
     assert(strstr(last_request,"\"count\":7"));
     puts("FMO station total: PASS (bounded probes, reply ownership, ignored range count, page fallback)");
+}
+
+static void summary_reply(unsigned total) {
+    bool row=s_summary.count_probe<total;
+    char msg[300];
+    snprintf(msg,sizeof(msg),"{\"type\":\"station\",\"subType\":\"%s\",\"code\":0,\"data\":{\"count\":999,\"list\":%s}}",
+        s_summary.category==FMO_STATION_PINNED?"getPinnedListResponse":"getActiveListResponse",
+        row?"[{\"uid\":1,\"name\":\"test\"}]":"[]");
+    parse_fmo_message(FMO_SOCKET_CONTROL,msg);
+}
+static void test_station_summary(void) {
+    memset(&s_snapshot,0,sizeof(s_snapshot));clock_ms=5000000;short_send=0;s_control_socket.client=1;
+    atomic_store(&s_setup_active,false);atomic_store(&s_setup_requested,false);
+    post_link(FMO_UPDATE_WIFI,false);post_link(FMO_UPDATE_WIFI,true);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);post_link(FMO_UPDATE_EVENTS_LINK,true);
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);s_position_pending=s_online_pending=false;
+    fmo_stations_t interactive=s_snapshot.stations;
+    const unsigned totals[]={12,36};
+    for(unsigned c=0;c<2;++c) {
+        if(c)clock_ms+=3000;
+        for(unsigned n=0;n<32;++n) {
+            assert(!request_station_summary());
+            assert(s_summary.request==FMO_STATION_LIST_WAIT);
+            assert(s_summary.category==(c?FMO_STATION_ACTIVE:FMO_STATION_PINNED));
+            int sent=sends;assert(!request_station_summary() && sends==sent);
+            summary_reply(totals[c]);
+            if(s_summary.request==FMO_STATION_NONE)break;
+        }
+    }
+    assert(published.state.pinned_count_valid && published.state.pinned_count==12);
+    assert(published.state.active_count_valid && published.state.active_count==36);
+    assert(!memcmp(&interactive,&s_snapshot.stations,sizeof(interactive)));
+    int count=sends;clock_ms+=1000;assert(!request_station_summary() && sends==count);
+    atomic_store(&s_setup_active,true);clock_ms+=60000;request_station_summary();assert(sends==count);
+    atomic_store(&s_setup_active,false);s_snapshot.stations.audio_paused=true;request_station_summary();assert(sends==count);
+    s_snapshot.stations.audio_paused=false;s_snapshot.stations.request=FMO_STATION_LIST_QUEUED;
+    request_station_summary();assert(sends==count);s_snapshot.stations.request=FMO_STATION_NONE;
+    // Zero is a valid count, not an error or stale cached value.
+    for(unsigned n=0;n<32;++n){request_station_summary();summary_reply(0);if(s_summary.request==FMO_STATION_NONE)break;}
+    assert(published.state.pinned_count_valid && published.state.pinned_count==0);
+    // User browsing waits for the owned reply, then takes priority over more probes.
+    clock_ms+=3000;request_station_summary();assert(s_summary.request==FMO_STATION_LIST_WAIT);
+    s_snapshot.stations.category=FMO_STATION_ACTIVE;s_snapshot.stations.request=FMO_STATION_LIST_QUEUED;
+    count=sends;request_station_control();assert(sends==count);
+    summary_reply(36);request_station_summary();assert(s_summary.request==FMO_STATION_NONE);
+    request_station_control();assert(sends==count+1 && s_snapshot.stations.request==FMO_STATION_LIST_WAIT);
+    s_snapshot.stations.request=FMO_STATION_NONE;
+    // A timed-out optional request drains once and stays disabled through metadata reconnects.
+    clock_ms+=60000;request_station_summary();assert(s_summary.request==FMO_STATION_LIST_WAIT);
+    unsigned failed=s_summary.category==FMO_STATION_PINNED?0:1;
+    clock_ms+=FMO_STATION_COUNT_BUDGET_MS;assert(request_station_summary());assert(s_summary_disabled[failed]);
+    s_snapshot.stations.request=FMO_STATION_LIST_QUEUED;
+    s_station_draining=true;
+    post_link(FMO_UPDATE_CONTROL_LINK,false);post_link(FMO_UPDATE_CONTROL_LINK,true);
+    s_station_draining=false;
+    assert(s_snapshot.stations.request==FMO_STATION_LIST_QUEUED);
+    assert(s_summary_due[failed]==UINT64_MAX);
+    assert(!published.state.pinned_count_valid && !published.state.active_count_valid);
+    post_link(FMO_UPDATE_WIFI,false);assert(!s_summary_disabled[0] && !s_summary_disabled[1]);
+    puts("FMO station summary: PASS (both totals, zero, cache, scheduling, UI priority, timeout isolation)");
+}
+
+static void test_online_count(void) {
+    memset(&s_snapshot,0,sizeof(s_snapshot)); clock_ms=3000000;short_send=0;s_control_socket.client=1;
+    atomic_store(&s_setup_active,false);atomic_store(&s_setup_requested,false);
+    post_link(FMO_UPDATE_WIFI,true);post_link(FMO_UPDATE_EVENTS_LINK,true);post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);s_position_pending=false;
+    const char *good="{\"type\":\"serverUsers\",\"subType\":\"getListPageResponse\",\"code\":0,\"data\":{\"total\":28}}";
+    parse_fmo_message(FMO_SOCKET_CONTROL,good);assert(!s_snapshot.state.online_count_valid);
+    request_online_count();assert(s_online_pending && strstr(last_request,"serverUsers"));
+    parse_fmo_message(FMO_SOCKET_EVENTS,good);assert(s_online_pending);
+    parse_fmo_message(FMO_SOCKET_CONTROL,good);assert(!s_online_pending && published.state.online_count_valid && published.state.online_count==28);
+    int count=sends;request_online_count();assert(sends==count);
+    const char *totals[]={"0","-1","1.5","4294967296","null","\"2\""};
+    for(unsigned i=0;i<6;++i){
+        clock_ms+=15000;request_online_count();assert(s_online_pending);
+        char msg[200];snprintf(msg,sizeof(msg),"{\"type\":\"serverUsers\",\"subType\":\"getListPageResponse\",\"code\":0,\"data\":{\"total\":%s}}",totals[i]);
+        parse_fmo_message(FMO_SOCKET_CONTROL,msg);
+        assert(published.state.online_count_valid==(i==0));
+        if(i==0)assert(published.state.online_count==0);
+        post_link(FMO_UPDATE_CONTROL_LINK,true);
+    }
+    request_online_count();clock_ms+=5000;request_online_count();assert(!s_online_pending && s_online_next_ms==UINT64_MAX);
+    parse_fmo_message(FMO_SOCKET_CONTROL,good);assert(!published.state.online_count_valid);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);request_online_count();parse_fmo_message(FMO_SOCKET_CONTROL,good);
+    post_link(FMO_UPDATE_CONTROL_LINK,false);assert(!published.state.online_count_valid);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);request_online_count();
+    parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"serverUsers\",\"subType\":\"getListPageResponse\",\"code\":403,\"data\":{\"total\":28}}");
+    assert(!published.state.online_count_valid);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);s_snapshot.stations.audio_paused=true;count=sends;request_online_count();assert(sends==count);
+    s_snapshot.stations.audio_paused=false;request_online_count();++s_snapshot.state.channel_uid;
+    parse_fmo_message(FMO_SOCKET_CONTROL,good);assert(!s_snapshot.state.online_count_valid);
+    s_online_pending=false;
+    puts("FMO online count: PASS (request ownership, totals, errors, timeout, reconnect, switch)");
 }
 
 static void test_local_position(void) {
@@ -875,6 +975,8 @@ int main(void) {
     atomic_store(&s_setup_requested,false);
     test_metadata_recovery();
     for(unsigned c=0;c<FMO_STATION_CATEGORY_COUNT;++c) test_station_total((fmo_station_category_t)c);
+    test_station_summary();
+    test_online_count();
     test_local_position();
     test_station_categories();
     puts("FMO network parser: PASS (cross-server flags/color lifecycle, recent-two history/sorting/isolation, large history receive/fragmentation, local profile exclusion, PTT background refresh, UTF-8, stale replies, invalid releases, reconnect)");

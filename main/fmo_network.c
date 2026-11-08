@@ -60,6 +60,12 @@ static bool s_clock_initialized, s_clock_online;
 static bool s_query_pending;
 static bool s_station_draining, s_station_prepared;
 static uint64_t s_query_ms;
+static fmo_stations_t s_summary;
+static bool s_summary_disabled[2];
+static uint64_t s_summary_due[2], s_summary_updated[2];
+static bool s_online_pending;
+static uint64_t s_online_query_ms, s_online_next_ms, s_online_updated_ms;
+static uint32_t s_online_channel;
 static bool s_position_pending;
 static uint64_t s_position_query_ms, s_position_next_ms;
 static unsigned s_events_stack_min = UINT32_MAX;
@@ -99,6 +105,9 @@ static void post_update(const fmo_update_t *update)
         snprintf(s_snapshot.connected_ssid, sizeof(s_snapshot.connected_ssid), "%.32s",
                  update->connected ? update->text : "");
         if (!update->connected) {
+            memset(s_summary_disabled, 0, sizeof(s_summary_disabled));
+            memset(&s_summary, 0, sizeof(s_summary));
+            state->pinned_count_valid = state->active_count_valid = false;
             s_query_pending = false;
             fmo_stations_disconnect(&s_snapshot.stations);
         }
@@ -112,6 +121,13 @@ static void post_update(const fmo_update_t *update)
         fmo_monitor_set_control(state, update->connected && state->wifi_connected);
         s_query_pending = false;
         s_position_pending = false;
+        s_online_pending = false;
+        memset(&s_summary, 0, sizeof(s_summary));
+        s_summary_due[0] = s_summary_disabled[0] ? UINT64_MAX : 0;
+        s_summary_due[1] = s_summary_disabled[1] ? UINT64_MAX : now_ms() + 3000;
+        state->pinned_count_valid = state->active_count_valid = false;
+        s_online_next_ms = 0;
+        state->online_count_valid = false;
         s_position_next_ms = 0;
         state->local_position_valid = false;
         if (!update->connected && !s_station_draining)
@@ -249,6 +265,21 @@ static void parse_fmo_history(const cJSON *data)
     if (update.history.count || !cJSON_GetArraySize(data)) post_update(&update);
 }
 
+/* Called with the state lock held; never publish partial probe results. */
+static void finish_station_summary(bool valid)
+{
+    unsigned index = s_summary.category == FMO_STATION_PINNED ? 0 : 1;
+    fmo_monitor_state_t *state = &s_snapshot.state;
+    if (!index) { state->pinned_count_valid = valid; state->pinned_count = s_summary.total; }
+    else { state->active_count_valid = valid; state->active_count = s_summary.total; }
+    s_summary_updated[index] = now_ms();
+    s_summary_due[index] = now_ms() + 60000;
+    unsigned other = 1 - index;
+    if (s_summary_due[other] < now_ms() + 3000) s_summary_due[other] = now_ms() + 3000;
+    s_summary.request = FMO_STATION_NONE;
+    xQueueOverwrite(s_update_queue, &s_snapshot);
+}
+
 /* Range count semantics differ between servers. Request one lookahead row;
  * retain six and derive the next-page flag from the actual array length. */
 static void parse_station_list(fmo_station_category_t category, const cJSON *data)
@@ -270,6 +301,13 @@ static void parse_station_list(fmo_station_category_t category, const cJSON *dat
         for (unsigned j = 0; j < i; ++j) if (rows[j].uid == rows[i].uid) valid = false;
     }
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if (s_summary.request == FMO_STATION_LIST_WAIT && s_summary.category == category) {
+        fmo_stations_list(&s_summary, valid ? rows : NULL, count);
+        if (!s_summary.counting) finish_station_summary(s_summary.total_known);
+        xSemaphoreGive(s_state_lock);
+        fmo_network_request_refresh();
+        return;
+    }
     if (s_snapshot.stations.category != category ||
         s_snapshot.stations.request != FMO_STATION_LIST_WAIT) {
         xSemaphoreGive(s_state_lock);
@@ -304,6 +342,30 @@ static void parse_local_position(const cJSON *data, bool malformed)
     xSemaphoreGive(s_state_lock);
 }
 
+/* Optional server statistics have independent reply ownership. */
+static void parse_online_count(const cJSON *root, bool malformed)
+{
+    const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+    const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    const cJSON *total = cJSON_GetObjectItemCaseSensitive(data, "total");
+    bool valid = !malformed && cJSON_IsNumber(code) && code->valuedouble == 0 &&
+        cJSON_IsNumber(total) && total->valuedouble >= 0 && total->valuedouble <= UINT32_MAX &&
+        total->valuedouble == (uint32_t)total->valuedouble;
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    fmo_monitor_state_t *state = &s_snapshot.state;
+    if (s_online_pending && now_ms() - s_online_query_ms < 5000 &&
+        state->wifi_connected && state->control_connected && state->channel_valid &&
+        state->channel_uid == s_online_channel && !s_snapshot.stations.audio_paused &&
+        !atomic_load(&s_setup_requested) && !atomic_load(&s_setup_active)) {
+        s_online_pending = false;
+        s_online_next_ms = valid ? now_ms() + 15000 : UINT64_MAX;
+        state->online_count_valid = valid;
+        if (valid) { state->online_count = (uint32_t)total->valuedouble; s_online_updated_ms = now_ms(); }
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+    }
+    xSemaphoreGive(s_state_lock);
+}
+
 static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
 {
     cJSON *root = cJSON_ParseWithOpts(payload, NULL, true);
@@ -318,6 +380,12 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
     const cJSON *sub_type = cJSON_GetObjectItemCaseSensitive(root, "subType");
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
     if (!cJSON_IsString(type) || !cJSON_IsString(sub_type)) {
+        cJSON_Delete(root);
+        return;
+    }
+    if (!strcmp(type->valuestring, "serverUsers")) {
+        if (kind == FMO_SOCKET_CONTROL && !strcmp(sub_type->valuestring, "getListPageResponse"))
+            parse_online_count(root, fmo_text_json_has_nul(payload));
         cJSON_Delete(root);
         return;
     }
@@ -511,7 +579,7 @@ static void request_local_position(void)
         s_snapshot.state.local_position_valid = false;
         xQueueOverwrite(s_update_queue, &s_snapshot);
     }
-    bool ready = !s_position_pending && now >= s_position_next_ms &&
+    bool ready = s_summary.request == FMO_STATION_NONE && !s_position_pending && now >= s_position_next_ms &&
         s_snapshot.state.wifi_connected && s_snapshot.state.control_connected &&
         s_snapshot.state.channel_valid && !s_query_pending &&
         s_snapshot.stations.request == FMO_STATION_NONE && !s_snapshot.stations.audio_paused &&
@@ -537,6 +605,107 @@ static void request_local_position(void)
     }
 }
 
+/* Poll every 15 seconds; disable unsupported/timed-out reads until reconnect.
+ * No request IDs exist, so a timed-out reply must never satisfy a retry. */
+static void request_online_count(void)
+{
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    uint64_t now = now_ms();
+    fmo_monitor_state_t *state = &s_snapshot.state;
+    bool expired = s_online_pending && now - s_online_query_ms >= 5000;
+    if (expired) { s_online_pending = false; s_online_next_ms = UINT64_MAX; }
+    if (expired || (state->online_count_valid && now - s_online_updated_ms >= 30000)) {
+        state->online_count_valid = false;
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+    }
+    bool ready = s_summary.request == FMO_STATION_NONE && !s_online_pending && now >= s_online_next_ms && state->wifi_connected &&
+        state->control_connected && state->channel_valid && !s_query_pending && !s_position_pending &&
+        s_snapshot.stations.request == FMO_STATION_NONE && !s_snapshot.stations.audio_paused &&
+        !atomic_load(&s_setup_requested) && !atomic_load(&s_setup_active);
+    if (!ready || !s_control_socket.client || !esp_websocket_client_is_connected(s_control_socket.client)) {
+        xSemaphoreGive(s_state_lock); return;
+    }
+    s_online_pending = true; s_online_query_ms = now; s_online_channel = state->channel_uid;
+    xSemaphoreGive(s_state_lock);
+    static const char request[] = "{\"type\":\"serverUsers\",\"subType\":\"getListPage\",\"data\":{\"page\":0,\"pageSize\":1}}";
+    int sent = esp_websocket_client_send_text(s_control_socket.client, request,
+        sizeof(request) - 1, pdMS_TO_TICKS(FMO_LINK_IO_TIMEOUT_MS));
+    if (sent != sizeof(request) - 1) {
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        s_online_pending = false; s_online_next_ms = UINT64_MAX; state->online_count_valid = false;
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+        xSemaphoreGive(s_state_lock);
+    }
+}
+
+/* Background counts share response types with interactive lists. Keep one
+ * owner, let UI work take priority, and drain timed-out replies before reuse. */
+static bool request_station_summary(void)
+{
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    uint64_t now = now_ms();
+    fmo_monitor_state_t *state = &s_snapshot.state;
+    bool changed = false;
+    if (state->pinned_count_valid && now - s_summary_updated[0] >= 120000) {
+        state->pinned_count_valid = false; changed = true;
+    }
+    if (state->active_count_valid && now - s_summary_updated[1] >= 120000) {
+        state->active_count_valid = false; changed = true;
+    }
+    if (changed) xQueueOverwrite(s_update_queue, &s_snapshot);
+    if (s_summary.request == FMO_STATION_LIST_WAIT) {
+        bool expired = now - s_summary.count_started_ms >= FMO_STATION_COUNT_BUDGET_MS;
+        if (expired) {
+            s_summary_disabled[s_summary.category == FMO_STATION_PINNED ? 0 : 1] = true;
+            finish_station_summary(false);
+        }
+        xSemaphoreGive(s_state_lock);
+        return expired;
+    }
+    bool ready = state->wifi_connected && state->control_connected && state->channel_valid &&
+        s_snapshot.stations.request == FMO_STATION_NONE && !s_snapshot.stations.audio_paused &&
+        !atomic_load(&s_setup_requested) && !atomic_load(&s_setup_active);
+    if (!ready) {
+        if (s_summary.request != FMO_STATION_NONE) {
+            unsigned index = s_summary.category == FMO_STATION_PINNED ? 0 : 1;
+            s_summary_due[index] = now + 60000;
+            s_summary.request = FMO_STATION_NONE;
+        }
+        xSemaphoreGive(s_state_lock); return false;
+    }
+    if (s_query_pending || s_position_pending || s_online_pending || !s_control_socket.client ||
+        !esp_websocket_client_is_connected(s_control_socket.client)) {
+        xSemaphoreGive(s_state_lock); return false;
+    }
+    if (s_summary.request == FMO_STATION_NONE) {
+        unsigned index = s_summary_due[0] <= s_summary_due[1] ? 0 : 1;
+        if (now < s_summary_due[index]) { xSemaphoreGive(s_state_lock); return false; }
+        memset(&s_summary, 0, sizeof(s_summary));
+        fmo_stations_load(&s_summary, index ? FMO_STATION_ACTIVE : FMO_STATION_PINNED, 0, now);
+        fmo_stations_begin_count(&s_summary, now);
+    }
+    fmo_stations_prepare_query(&s_summary, now);
+    if (!s_summary.counting) {
+        finish_station_summary(false); xSemaphoreGive(s_state_lock); return false;
+    }
+    char request[128];
+    int length = snprintf(request, sizeof(request),
+        "{\"type\":\"station\",\"subType\":\"%s\",\"data\":{\"start\":%lu,\"count\":1}}",
+        fmo_stations_query_name(s_summary.category), (unsigned long)s_summary.count_probe);
+    s_summary.request = FMO_STATION_LIST_WAIT;
+    xSemaphoreGive(s_state_lock);
+    int sent = esp_websocket_client_send_text(s_control_socket.client, request, length,
+        pdMS_TO_TICKS(FMO_LINK_IO_TIMEOUT_MS));
+    if (sent != length) {
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        s_summary_disabled[s_summary.category == FMO_STATION_PINNED ? 0 : 1] = true;
+        finish_station_summary(false);
+        xSemaphoreGive(s_state_lock);
+        return true;
+    }
+    return false;
+}
+
 /* /ws has no request IDs. List/set transactions own it exclusively;
  * channel polling resumes only after their reply or a drained connection. */
 static bool request_station_control(void)
@@ -546,6 +715,9 @@ static bool request_station_control(void)
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
     fmo_stations_t *stations = &s_snapshot.stations;
     fmo_station_request_t phase = stations->request;
+    if (s_summary.request == FMO_STATION_LIST_WAIT) {
+        xSemaphoreGive(s_state_lock); return false;
+    }
     if (phase == FMO_STATION_NONE || phase == FMO_STATION_VERIFY ||
         phase == FMO_STATION_RECONCILE ||
         (phase == FMO_STATION_LIST_QUEUED && s_query_pending)) {
@@ -853,6 +1025,7 @@ static bool prepare_station_work(void)
         stop_socket(&s_control_socket);
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
         s_station_draining = false;
+        s_summary.request = FMO_STATION_NONE;
         s_station_prepared = prepare;
         xSemaphoreGive(s_state_lock);
     }
@@ -1049,7 +1222,18 @@ static void network_task(void *argument)
                 err = start_target_socket(&s_control_socket, "ws");
                 if (err != ESP_OK) ESP_LOGW(TAG, "Control client creation failed; retrying");
             }
+            if (request_station_summary()) {
+                xSemaphoreTake(s_state_lock, portMAX_DELAY);
+                s_station_draining = true; /* Preserve queued user work during the drain. */
+                xSemaphoreGive(s_state_lock);
+                post_link(FMO_UPDATE_CONTROL_LINK, false);
+                stop_socket(&s_control_socket);
+                xSemaphoreTake(s_state_lock, portMAX_DELAY);
+                s_station_draining = false;
+                xSemaphoreGive(s_state_lock);
+            }
             request_local_position();
+            request_online_count();
             if (request_station_control()) {
                 post_link(FMO_UPDATE_CONTROL_LINK, false);
                 stop_socket(&s_control_socket);

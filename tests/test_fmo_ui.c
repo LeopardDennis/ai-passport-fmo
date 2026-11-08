@@ -35,6 +35,51 @@ static lv_obj_t *find_text(lv_obj_t *parent, const char *text)
     }
     return NULL;
 }
+static lv_obj_t *find_history_panel(lv_obj_t *parent)
+{
+    for (unsigned i = 0; i < lv_obj_get_child_count(parent); ++i) {
+        lv_obj_t *child = lv_obj_get_child(parent, i);
+        if (lv_obj_get_y(child) == 183 && lv_obj_get_height(child) == 83) return child;
+        lv_obj_t *found = find_history_panel(child);
+        if (found) return found;
+    }
+    return NULL;
+}
+static lv_obj_t *history_panel(void)
+{
+    lv_obj_update_layout(lv_screen_active());
+    lv_obj_t *panel = find_history_panel(lv_screen_active());
+    assert(panel); return panel;
+}
+static char drawn_summary[80];
+static void observe_summary(lv_event_t *event)
+{
+    lv_draw_task_t *task=lv_event_get_draw_task(event);
+    lv_draw_label_dsc_t *dsc=lv_draw_task_get_label_dsc(task);
+    if(!dsc || dsc->base.id1!=0x53554d4d)return;
+    snprintf(drawn_summary,sizeof(drawn_summary),"%s",dsc->text);
+    lv_area_t area;lv_draw_task_get_area(task,&area);
+    assert(dsc->font==fmo_wifi_font() && dsc->text_size.x<=216);
+    assert(abs(area.x1+area.x2-239)<=1);
+    uint32_t index=0;
+    while(dsc->text[index]) {
+        uint32_t code=lv_text_encoded_next(dsc->text,&index);
+        lv_font_glyph_dsc_t glyph;
+        if(!lv_font_get_glyph_dsc(dsc->font,&glyph,code,0) || !glyph.box_h)continue;
+        int top=area.y1+dsc->font->line_height-dsc->font->base_line-glyph.box_h-glyph.ofs_y;
+        assert(top>=273 && top+glyph.box_h<=289);
+    }
+}
+static void verify_summary(lv_display_t *display,const char *expected)
+{
+    lv_obj_t *obj=lv_obj_get_parent(history_panel());drawn_summary[0]=0;
+    lv_obj_add_flag(obj,LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    lv_obj_add_event_cb(obj,observe_summary,LV_EVENT_DRAW_TASK_ADDED,NULL);
+    lv_obj_invalidate(obj);lv_refr_now(display);
+    lv_obj_remove_event_cb(obj,observe_summary);
+    lv_obj_remove_flag(obj,LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    assert(!strcmp(drawn_summary,expected));
+}
 static void verify(const char *value, uint32_t color)
 {
     lv_obj_t *obj = find_text(lv_screen_active(), value);
@@ -59,7 +104,7 @@ static void observe_qso_draw(lv_event_t *event)
 }
 static void verify_dates(lv_display_t *display, const char *first, const char *last)
 {
-    lv_obj_t *panel=lv_obj_get_parent(find_text(lv_screen_active(),"QSO"));
+    lv_obj_t *panel=history_panel();
     drawn_count=0;
     lv_obj_add_flag(panel,LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
     lv_obj_add_event_cb(panel,observe_qso_draw,LV_EVENT_DRAW_TASK_ADDED,NULL);
@@ -113,7 +158,7 @@ static void observe_path_draw(lv_event_t *event)
 }
 static const char *read_path(lv_display_t *display)
 {
-    lv_obj_t *panel = lv_obj_get_parent(find_text(lv_screen_active(),"QSO"));
+    lv_obj_t *panel = history_panel();
     lv_obj_t *screen = lv_obj_get_parent(panel);
     // Observer flags change LVGL's text-size path. Production drawing must match.
     lv_obj_invalidate(screen);
@@ -265,7 +310,7 @@ static const char *find_location_above_qso(lv_obj_t *panel)
     lv_obj_update_layout(lv_screen_active());
     lv_area_t frame;
     lv_obj_get_coords(panel, &frame);
-    assert(frame.y1 == 183 && frame.y2 == 289);
+    assert(frame.y1 == 183 && frame.y2 == 265);
     read_path(lv_display_get_default());
     assert(drawn_place[0]);
     return drawn_place;
@@ -282,8 +327,8 @@ static void verify_location_row(lv_display_t *display, fmo_monitor_state_t state
                                 fmo_controls_t controls)
 {
     fmo_monitor_state_t original = state;
-    lv_obj_t *panel = lv_obj_get_parent(find_text(lv_screen_active(), "QSO"));
-    assert(lv_obj_get_child_count(panel) == 3);
+    lv_obj_t *panel = history_panel();
+    assert(lv_obj_get_child_count(panel) == 2);
     const char *place = find_location_above_qso(panel);
     assert(!strcmp(place, "--"));
     lv_obj_update_layout(lv_screen_active());
@@ -498,10 +543,42 @@ int main(int argc, char **argv)
     state.speaker_cross_server=false;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
     verify("BG5ESN",0xFF8A00);
-    assert(find_text(lv_screen_active(), "QSO"));
+    assert(!find_text(lv_screen_active(), "QSO"));
+    state.pinned_count_valid=state.active_count_valid=true;
+    state.pinned_count=12;state.active_count=36;
+    fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    verify_summary(display,"收藏台站 12 · 活跃台站 36");
+    state.pinned_count=0;state.active_count_valid=false;
+    fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    verify_summary(display,"收藏台站 0 · 活跃台站 --");
+    state.pinned_count_valid=state.active_count_valid=true;
+    state.pinned_count=state.active_count=65535;
+    fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    verify_summary(display,"收藏台站 65535 · 活跃台站 65535");
+    state.pinned_count_valid=state.active_count_valid=false;
+    state.online_count_valid=true;state.online_count=28;
+    fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    lv_obj_t *online=find_text(lv_screen_active(),"28");assert(online);
+    assert(lv_obj_get_parent(online)==lv_obj_get_parent(history_panel()));
+    lv_obj_update_layout(lv_screen_active());
+    lv_area_t online_area, air_area;
+    lv_obj_get_coords(online, &online_area);
+    lv_obj_get_coords(find_text(lv_screen_active(),"正在通联"), &air_area);
+    assert(abs(online_area.y1 - air_area.y1) <= 8);
+    assert(air_area.x2 < online_area.x1 && online_area.x2 <= 227);
+    assert(lv_color_eq(lv_obj_get_style_text_color(online,0),lv_color_hex(0xFF8A00)));
+    lv_font_glyph_dsc_t count_glyph;
+    assert(lv_font_get_glyph_dsc(&lv_font_montserrat_14,&count_glyph,'2','8'));
+    int count_top=online_area.y1+lv_font_montserrat_14.line_height-
+        lv_font_montserrat_14.base_line-count_glyph.box_h-count_glyph.ofs_y;
+    assert(abs((2*count_top+(int)count_glyph.box_h-1)-(2*99+15))<=1);
+    state.online_count=0;fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    assert(find_text(lv_screen_active(),"0"));
+    state.online_count_valid=false;fmo_ui_render(&state,"","","",82,12000,false,&controls);
+    assert(!strcmp(lv_label_get_text(online),"--"));
     verify_dates(display,"2026-01-01 20:57:00","2026-01-01 20:56:00");
-    lv_obj_t *history_panel=lv_obj_get_parent(find_text(lv_screen_active(),"QSO"));
-    lv_obj_t *history_call=lv_obj_get_child(history_panel,1);
+    lv_obj_t *history_box=history_panel();
+    lv_obj_t *history_call=lv_obj_get_child(history_box,0);
     assert(!strcmp(lv_label_get_text(history_call),"BG5ESN"));
     assert(lv_obj_get_style_text_font(history_call,0)==&fmo_callsign_bold_14);
     assert(lv_color_eq(lv_obj_get_style_text_color(history_call,0),lv_color_hex(0xF4F4F4)));
@@ -585,7 +662,7 @@ int main(int argc, char **argv)
     lv_obj_t *callsign = find_text(lv_screen_active(), "BG5ESN");
     int call_y = lv_obj_get_y(callsign);
     int status_y = lv_obj_get_y(find_text(lv_screen_active(), "上次通联"));
-    lv_obj_t *profile = lv_obj_get_parent(find_text(lv_screen_active(), "QSO"));
+    lv_obj_t *profile = history_panel();
     int profile_y = lv_obj_get_y(profile), profile_h = lv_obj_get_height(profile);
     fmo_history_t saved_history = state.history;
     memset(&state.history, 0, sizeof(state.history));
@@ -766,6 +843,8 @@ int main(int argc, char **argv)
         state.local_position = (fmo_position_t){23000000,113200000};
         fmo_monitor_set_position(&state, true, (fmo_position_t){23061900,113104000});
         strcpy(state.location, "佛山市");
+        if (!strcmp(argv[1], "path_linxia")) strcpy(state.location, "甘肃省 临夏市");
+        if (!strcmp(argv[1], "path_hohhot")) strcpy(state.location, "呼和浩特市 玉泉区");
         if (!strcmp(argv[1], "path_city_area")) strcpy(state.location, "佛山市 南海区");
         if (!strcmp(argv[1], "path_region")) strcpy(state.location, "内蒙古自治区");
         if (!strcmp(argv[1], "path_grid")) state.position_valid = false;
@@ -800,8 +879,8 @@ int main(int argc, char **argv)
         lv_area_t a, b;
         lv_obj_get_coords(call, &a); lv_obj_get_coords(grid, &b);
         assert(b.x1 == a.x2 + 5 && b.x2 <= 227);
-        lv_obj_t *panel = lv_obj_get_parent(find_text(lv_screen_active(), "QSO"));
-        assert(lv_obj_get_child_count(panel) == 3); /* Only the title and two records are inside. */
+        lv_obj_t *panel = history_panel();
+        assert(lv_obj_get_child_count(panel) == 2); /* Only the two records are inside. */
         const char *place = find_location_above_qso(panel);
         if (strcmp(argv[1], "location_long")) assert(!strcmp(place, "佛山"));
         else {
@@ -843,7 +922,7 @@ int main(int argc, char **argv)
     }
     if (argc > 1 && !strncmp(argv[1], "path", 4)) {
         lv_obj_update_layout(lv_screen_active());
-        lv_obj_t *panel = lv_obj_get_parent(find_text(lv_screen_active(), "QSO"));
+        lv_obj_t *panel = history_panel();
         find_location_above_qso(panel);
         const char *value = read_path(display);
         if (!strcmp(argv[1], "path_missing")) assert(!strcmp(value, "--° --  -- km"));
@@ -856,6 +935,8 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[1], "path_max")) assert(!strcmp(value, "225° SW  20015 km"));
         else assert(!strcmp(value, "305° NW  12 km"));
+        if (!strcmp(argv[1], "path_linxia")) verify_place(display, "甘肃 临夏");
+        if (!strcmp(argv[1], "path_hohhot")) verify_place(display, "呼和浩特 玉泉");
         if (!strcmp(argv[1], "path_city_area")) verify_place(display, "佛山 南海");
         if (!strcmp(argv[1], "path_region")) verify_place(display, "内蒙古");
         verify("OL63NB", 0x929292);
@@ -1042,7 +1123,7 @@ int main(int argc, char **argv)
         lv_tick_inc(2000);lv_timer_handler();lv_refr_now(display);
         assert(((lv_label_t *)call)->offset.x==0);
         assert(!memcmp(before,pixels+240*116,sizeof(before)));
-        lv_obj_t *panel=lv_obj_get_parent(find_text(lv_screen_active(),"QSO"));
+        lv_obj_t *panel=history_panel();
         for(unsigned i=0;i<lv_obj_get_child_count(panel);++i) {
             lv_obj_t *child=lv_obj_get_child(panel,i);
             if(lv_obj_get_style_text_font(child,0)==&fmo_callsign_bold_14)
@@ -1108,6 +1189,14 @@ int main(int argc, char **argv)
     if (memory.free_biggest_size < 4096)
         fprintf(stderr,"LVGL: peak=%u free=%u largest=%u\n",(unsigned)memory.max_used,(unsigned)memory.free_size,(unsigned)memory.free_biggest_size);
     assert(memory.free_biggest_size >= 4096); /* Leave room for later LVGL redraws. */
+    if (argc > 1 && !strcmp(argv[1],"online")) {
+        state.wifi_connected=true;state.control_connected=true;state.channel_valid=true;
+        state.online_count_valid=true;state.online_count=28;
+        state.pinned_count_valid=state.active_count_valid=true;
+        state.pinned_count=12;state.active_count=36;
+        fmo_ui_render(&state,"","","",82,12000,false,&controls);
+        lv_refr_now(display);
+    }
     if (argc > 2) {
         FILE *f = fopen(argv[2], "wb"); assert(f);
         fprintf(f, "P6\n240 320\n255\n");

@@ -9,19 +9,28 @@ static bool suffix(const char *name, const char *ending)
     return n >= e && !strcmp(name + n - e, ending);
 }
 
-static const char *place_field(const cJSON *props, const char *key)
+static const char *place_field(const cJSON *props, const char *key, char *checked)
 {
     const cJSON *value = cJSON_GetObjectItemCaseSensitive(props, key);
-    char checked[FMO_LOCATION_MAX + 1];
     if (!cJSON_IsString(value) || !value->valuestring[0] ||
-        !fmo_text_copy_utf8(checked, sizeof(checked), value->valuestring) ||
+        !fmo_text_copy_utf8(checked, FMO_LOCATION_MAX + 1, value->valuestring) ||
         !strcmp(value->valuestring, "市辖区") || !strcmp(value->valuestring, "市辖县")) return NULL;
+    /* Mixed Chinese/Mongolian OSM labels contain a usable Chinese prefix.
+     * Keep it instead of sending unsupported Mongolian glyphs to the LCD. */
+    for (unsigned char *p = (unsigned char *)checked; *p; ++p) {
+        if (p[0] == 0xe1 && p[1] >= 0xa0 && p[1] <= 0xa2) {
+            *p = 0;
+            while (p > (unsigned char *)checked && p[-1] == ' ') *--p = 0;
+            break;
+        }
+    }
+    if (!checked[0] || !strcmp(checked, "市辖区") || !strcmp(checked, "市辖县")) return NULL;
     /* Photon field names do not guarantee administrative level. In China,
      * district (and sometimes city/county) can describe a subdistrict/town. */
     static const char *local_suffixes[] = {"街道", "街道办事处", "镇", "乡", "苏木", "村", "社区"};
     for (unsigned i = 0; i < sizeof(local_suffixes) / sizeof(local_suffixes[0]); ++i)
-        if (suffix(value->valuestring, local_suffixes[i])) return NULL;
-    return value->valuestring;
+        if (suffix(checked, local_suffixes[i])) return NULL;
+    return checked;
 }
 
 static const char *municipality_name(const char *name)
@@ -67,10 +76,11 @@ bool fmo_location_parse_response(const char *json, char *name, size_t capacity)
     const cJSON *features = cJSON_GetObjectItemCaseSensitive(root, "features");
     const cJSON *feature = cJSON_IsArray(features) ? cJSON_GetArrayItem(features, 0) : NULL;
     const cJSON *props = cJSON_GetObjectItemCaseSensitive(feature, "properties");
-    const char *state = place_field(props, "state");
-    const char *city = place_field(props, "city");
-    const char *county = place_field(props, "county");
-    const char *district = place_field(props, "district");
+    char fields[5][FMO_LOCATION_MAX + 1];
+    const char *state = place_field(props, "state", fields[0]);
+    const char *city = place_field(props, "city", fields[1]);
+    const char *county = place_field(props, "county", fields[2]);
+    const char *district = place_field(props, "district", fields[3]);
     const char *area = NULL;
     /* Photon may put a municipality's district in city, or a prefecture
      * in county. Keep the city first instead of showing only its district. */
@@ -88,7 +98,12 @@ bool fmo_location_parse_response(const char *json, char *name, size_t capacity)
     } else area = different(county, city);
     if (!area) area = different(district, city);
     if (!city) { city = county ? county : district ? district : state; area = NULL; }
-    if (!city) city = place_field(props, "country");
+    /* No usable county/district: retain the supplied province for context. */
+    if (!area && city && state && different(state, city)) {
+        area = city;
+        city = state;
+    }
+    if (!city) city = place_field(props, "country", fields[4]);
     if (city) fmo_text_copy_utf8(name, capacity, city);
     if (name[0] && area && strcmp(area, city)) {
         size_t used = strlen(name);
