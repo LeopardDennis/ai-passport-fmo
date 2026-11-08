@@ -159,7 +159,8 @@ int main(void) {
  reset();heap=56*1024;run_worker();assert(opens==(compact_tls?1:0));
  reset();heap=56*1024-1;run_worker();assert(!opens && !saves);
  reset();heap=64*1024;run_worker();assert(opens==1 && saves==1);
- reset();largest_block=32*1024-1;run_worker();assert(!opens && !saves);
+ reset();largest_block=(compact_tls?24:32)*1024-1;run_worker();assert(!opens && !saves);
+ reset();heap=60952;largest_block=28672;run_worker();assert(opens==(compact_tls?1:0));
  reset();heap=16000;run_worker();assert(!opens && !saves);
  // A new speaker can start after 3 seconds, without a post-response 15s wait.
  reset();cycle_hook=next_speaker;cycle_limit=20;run_worker();

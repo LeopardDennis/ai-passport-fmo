@@ -33,7 +33,7 @@ def run():
     header = (ROOT / "main/fmo_network.h").read_text()
     types = header[header.index("typedef enum"):header.index("/* Starts")]
     functions = "\n".join(extract_function(source, name) for name in (
-        "start_target_socket", "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "finish_station_summary", "request_station_summary", "parse_station_list", "parse_local_position", "parse_online_count", "request_online_count", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_local_position", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
+        "start_target_socket", "update_clock_service", "link_state_bits", "post_update", "json_bool", "copy_ascii", "invalidate_live_message", "parse_fmo_history", "finish_station_summary", "request_station_summary", "parse_station_list", "parse_local_position", "parse_online_role", "parse_online_count", "request_online_count", "parse_fmo_message", "reset_rx", "receive_fragment", "request_current_channel", "request_local_position", "request_station_control", "prepare_station_work", "expire_channel", "cleanup_wifi", "prepare_network", "post_link", "recover_metadata"))
     functions += "\n" + source[source.index("void fmo_network_request_retry(void)"):source.index("bool fmo_network_get_saved_wifi(")]
     functions += "\n" + source[source.index("bool fmo_network_location_snapshot("):]
     preamble = r'''
@@ -73,6 +73,7 @@ static fmo_stations_t s_summary;
 static bool s_summary_disabled[2];
 static uint64_t s_summary_due[2], s_summary_updated[2];
 static bool s_online_pending;
+static bool s_online_role_known, s_online_allowed, s_online_role_pending;
 static uint64_t s_online_query_ms, s_online_next_ms, s_online_updated_ms;
 static uint32_t s_online_channel;
 static bool s_position_pending;
@@ -328,17 +329,40 @@ static void test_station_summary(void) {
     post_link(FMO_UPDATE_CONTROL_LINK,false);post_link(FMO_UPDATE_CONTROL_LINK,true);
     s_station_draining=false;
     assert(s_snapshot.stations.request==FMO_STATION_LIST_QUEUED);
-    assert(s_summary_due[failed]==UINT64_MAX);
-    assert(!published.state.pinned_count_valid && !published.state.active_count_valid);
+    assert(s_summary_due[failed]==clock_ms+60000);
+    assert(published.state.pinned_count_valid && !published.state.active_count_valid);
+    // A failed category becomes eligible again after cooldown, without a Wi-Fi toggle.
+    s_snapshot.stations.request=FMO_STATION_NONE;clock_ms+=60000;
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    s_position_pending=s_online_pending=false;s_summary_due[1-failed]=UINT64_MAX;
+    request_station_summary();assert(s_summary.request==FMO_STATION_LIST_WAIT && !s_summary_disabled[failed]);
     post_link(FMO_UPDATE_WIFI,false);assert(!s_summary_disabled[0] && !s_summary_disabled[1]);
     puts("FMO station summary: PASS (both totals, zero, cache, scheduling, UI priority, timeout isolation)");
+}
+
+static void test_online_role(void) {
+    memset(&s_snapshot,0,sizeof(s_snapshot));clock_ms=7000000;s_control_socket.client=1;short_send=0;
+    post_link(FMO_UPDATE_WIFI,true);post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);s_position_pending=false;
+    request_online_count();assert(s_online_pending && s_online_role_pending && strstr(last_request,"getRole"));
+    parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"config\",\"subType\":\"getRoleResponse\",\"code\":0,\"data\":{\"role\":0}}");
+    assert(s_online_role_known && !s_online_allowed && !published.state.online_count_valid);
+    int count=sends;request_online_count();assert(sends==count);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);
+    query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);
+    request_online_count();
+    parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"config\",\"subType\":\"getRoleResponse\",\"code\":0,\"data\":{\"role\":2}}");
+    assert(s_online_role_known && s_online_allowed && !s_online_pending);
+    request_online_count();assert(s_online_pending && !s_online_role_pending && strstr(last_request,"serverUsers"));
+    s_online_pending=false;
 }
 
 static void test_online_count(void) {
     memset(&s_snapshot,0,sizeof(s_snapshot)); clock_ms=3000000;short_send=0;s_control_socket.client=1;
     atomic_store(&s_setup_active,false);atomic_store(&s_setup_requested,false);
-    post_link(FMO_UPDATE_WIFI,true);post_link(FMO_UPDATE_EVENTS_LINK,true);post_link(FMO_UPDATE_CONTROL_LINK,true);
+    post_link(FMO_UPDATE_WIFI,true);post_link(FMO_UPDATE_EVENTS_LINK,true);post_link(FMO_UPDATE_CONTROL_LINK,true);s_online_role_known=s_online_allowed=true;s_online_role_pending=false;
     query();parse_fmo_message(FMO_SOCKET_CONTROL,CHANNEL42);s_position_pending=false;
+    s_online_role_known=s_online_allowed=true;
     const char *good="{\"type\":\"serverUsers\",\"subType\":\"getListPageResponse\",\"code\":0,\"data\":{\"total\":28}}";
     parse_fmo_message(FMO_SOCKET_CONTROL,good);assert(!s_snapshot.state.online_count_valid);
     request_online_count();assert(s_online_pending && strstr(last_request,"serverUsers"));
@@ -352,16 +376,16 @@ static void test_online_count(void) {
         parse_fmo_message(FMO_SOCKET_CONTROL,msg);
         assert(published.state.online_count_valid==(i==0));
         if(i==0)assert(published.state.online_count==0);
-        post_link(FMO_UPDATE_CONTROL_LINK,true);
+        post_link(FMO_UPDATE_CONTROL_LINK,true);s_online_role_known=s_online_allowed=true;s_online_role_pending=false;
     }
     request_online_count();clock_ms+=5000;request_online_count();assert(!s_online_pending && s_online_next_ms==UINT64_MAX);
     parse_fmo_message(FMO_SOCKET_CONTROL,good);assert(!published.state.online_count_valid);
-    post_link(FMO_UPDATE_CONTROL_LINK,true);request_online_count();parse_fmo_message(FMO_SOCKET_CONTROL,good);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);s_online_role_known=s_online_allowed=true;s_online_role_pending=false;request_online_count();parse_fmo_message(FMO_SOCKET_CONTROL,good);
     post_link(FMO_UPDATE_CONTROL_LINK,false);assert(!published.state.online_count_valid);
-    post_link(FMO_UPDATE_CONTROL_LINK,true);request_online_count();
+    post_link(FMO_UPDATE_CONTROL_LINK,true);s_online_role_known=s_online_allowed=true;s_online_role_pending=false;request_online_count();
     parse_fmo_message(FMO_SOCKET_CONTROL,"{\"type\":\"serverUsers\",\"subType\":\"getListPageResponse\",\"code\":403,\"data\":{\"total\":28}}");
     assert(!published.state.online_count_valid);
-    post_link(FMO_UPDATE_CONTROL_LINK,true);s_snapshot.stations.audio_paused=true;count=sends;request_online_count();assert(sends==count);
+    post_link(FMO_UPDATE_CONTROL_LINK,true);s_online_role_known=s_online_allowed=true;s_online_role_pending=false;s_snapshot.stations.audio_paused=true;count=sends;request_online_count();assert(sends==count);
     s_snapshot.stations.audio_paused=false;request_online_count();++s_snapshot.state.channel_uid;
     parse_fmo_message(FMO_SOCKET_CONTROL,good);assert(!s_snapshot.state.online_count_valid);
     s_online_pending=false;
@@ -976,6 +1000,7 @@ int main(void) {
     test_metadata_recovery();
     for(unsigned c=0;c<FMO_STATION_CATEGORY_COUNT;++c) test_station_total((fmo_station_category_t)c);
     test_station_summary();
+    test_online_role();
     test_online_count();
     test_local_position();
     test_station_categories();

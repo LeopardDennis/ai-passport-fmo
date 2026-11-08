@@ -559,6 +559,7 @@ int main(int argc, char **argv)
     state.online_count_valid=true;state.online_count=28;
     fmo_ui_render(&state,"","","",82,12000,false,&controls);
     lv_obj_t *online=find_text(lv_screen_active(),"28");assert(online);
+    assert(!lv_obj_has_flag(online,LV_OBJ_FLAG_HIDDEN));
     assert(lv_obj_get_parent(online)==lv_obj_get_parent(history_panel()));
     lv_obj_update_layout(lv_screen_active());
     lv_area_t online_area, air_area;
@@ -574,8 +575,12 @@ int main(int argc, char **argv)
     assert(abs((2*count_top+(int)count_glyph.box_h-1)-(2*99+15))<=1);
     state.online_count=0;fmo_ui_render(&state,"","","",82,12000,false,&controls);
     assert(find_text(lv_screen_active(),"0"));
+    assert(!lv_obj_has_flag(online,LV_OBJ_FLAG_HIDDEN));
     state.online_count_valid=false;fmo_ui_render(&state,"","","",82,12000,false,&controls);
-    assert(!strcmp(lv_label_get_text(online),"--"));
+    assert(lv_obj_has_flag(online,LV_OBJ_FLAG_HIDDEN));
+    lv_refr_now(display);
+    for (int y=94;y<116;++y) for (int x=116;x<228;++x)
+        assert(pixels[y*240+x]==0); /* Neither count nor icon remains. */
     verify_dates(display,"2026-01-01 20:57:00","2026-01-01 20:56:00");
     lv_obj_t *history_box=history_panel();
     lv_obj_t *history_call=lv_obj_get_child(history_box,0);

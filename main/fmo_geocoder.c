@@ -22,10 +22,12 @@
  * Keep the original guard for custom builds with fixed/larger TLS buffers. */
 #if CONFIG_MBEDTLS_DYNAMIC_BUFFER && CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN <= 1024
 #define LOOKUP_MIN_FREE_HEAP (56 * 1024)
+/* Dynamic TLS needs a full 16 KiB RX record, not a 32 KiB allocation. */
+#define LOOKUP_MIN_BLOCK (24 * 1024)
 #else
 #define LOOKUP_MIN_FREE_HEAP (64 * 1024)
-#endif
 #define LOOKUP_MIN_BLOCK (32 * 1024)
+#endif
 static const char *TAG = "fmo_location";
 static fmo_location_cache_t cache;
 static TaskHandle_t worker;

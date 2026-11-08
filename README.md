@@ -25,9 +25,9 @@ All enabled sockets reconnect automatically. No FMO device certificate or privat
 is copied to AI Passport because the firmware observes the local FMO interface;
 it does not act as a virtual FMO radio or connect directly to an FMO MQTT server.
 
-The history frame has no QSO title. A two-person icon and online-user count appear directly below the station name, right-aligned beside the contact status. Read `serverUsers/getListPage` (`pageSize: 1`) every 15 seconds and display `data.total`. Unsupported/denied queries, disconnection, switching, timeout or data older than 30 seconds show a placeholder. Timed-out or rejected queries remain disabled until control reconnection. Availability was verified on an administrator-role FMO; other roles depend on device permissions.
+The online list is an administrative interface: check `config/getRole` on each channel and hide the entire count/icon indicator for ordinary role 0, whose empty list does not prove zero online users. The history frame has no QSO title. A two-person icon and online-user count appear directly below the station name, right-aligned beside the contact status. Read `serverUsers/getListPage` (`pageSize: 1`) every 15 seconds and display `data.total`. Unsupported/denied queries, disconnection, switching, timeout or data older than 30 seconds hide the entire indicator, including its icon. Timed-out or rejected queries remain disabled until control reconnection. Availability was verified on an administrator-role FMO; other roles depend on device permissions.
 
-The row below the contact frame shows cached favorite and active station counts. Each category refreshes every 60 seconds with at least three seconds between category batches. Counts use bounded one-row probes rather than the response page count. Browsing, switching and setup take priority. Unknown, disconnected or two-minute-old values show placeholders; confirmed empty lists show zero. A timed-out count drains the control connection once, then disables that category until Wi-Fi reconnects.
+The row below the contact frame shows cached favorite and active station counts. Each category refreshes every 60 seconds with at least three seconds between category batches. Counts use bounded one-row probes rather than the response page count. Browsing, switching and setup take priority. Unknown, disconnected or two-minute-old values show placeholders; confirmed empty lists show zero. Fresh totals survive channel/control reconnections. Failed counts drain ambiguous replies once and retry after a 60-second cooldown; cached values expire after two minutes.
 
 ## Speaker location
 
@@ -110,9 +110,9 @@ Up to 32 successful places persist in ordinary application NVS, bounded to
 roughly 4 KiB of NVS entries plus namespace/page overhead; the RAM cache is about
 2.2 KiB. The worker has a 6 KiB stack, with additional transient HTTP/TLS heap. Default builds use on-demand TLS record buffers,
 1 KiB outgoing records and the standard 16 KiB incoming limit. The worker requires
-56 KiB free internal heap and a 32 KiB contiguous block before querying; custom
+56 KiB free internal heap and a 24 KiB contiguous block before querying; custom
 builds without dynamic buffers or with larger outgoing records retain the 64 KiB
-free-heap gate. The 4 KiB response buffer is allocated after the handshake peak.
+free-heap gate and 32 KiB contiguous-block threshold. The 4 KiB response buffer is allocated after the handshake peak.
 Empty cache slots are filled before evicting entries in bounded rotation, including
 a partially populated cache restored after reboot. Successful entries have no time-based expiry. Reboot
 retains them; firmware installation cleanup removes them. Only successful new
@@ -238,8 +238,7 @@ is written to NVS, not every reconnect. WPA2-or-newer personal networks and open
 networks are supported, not enterprise authentication.
 
 On first boot, a credential-free build starts a protected hotspot and displays
-the three-action network menu. Select **Wi-Fi setup** with UP/DOWN and click OK
-to open the connection QR. Join the
+the connection QR as soon as the hotspot is ready. Join the
 `FMO-Setup-XXXX` network using the random password shown on the Passport screen.
 Keep the phone connected even if it reports no Internet, then open
 `http://192.168.9.1` manually. Choose a nearby 2.4 GHz Wi-Fi network or type a
@@ -279,7 +278,7 @@ identity and Recovery remain protected.
 
 On the main screen, long-press **OK** to open the network menu. Use UP/DOWN to select **Wi-Fi setup**,
 **Select Wi-Fi**, or **Return**, then click OK. Long OK returns. Setup
-restarts into the network menu; click OK on Wi-Fi setup to open the QR screen.
+opens the QR screen automatically once the restarted hotspot is ready.
 It remains available when the old router is offline.
 Select Wi-Fi opens a list of up to five saved Wi-Fi names. Use UP/DOWN to select a name
 and click OK to connect; long OK returns to the network menu. The actual connected

@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+- Hide the entire online-count indicator, including its people icon, until the current channel has permitted and valid statistics. Remove the placeholder and reclaim the status-row width when unavailable.
+
+- Open the Wi-Fi connection QR automatically when the hotspot becomes ready, preserving later QR/info/menu navigation. Retain fresh station totals across channel/control reconnections and retry failed background counts after cooldown. Verify online-list access before reading counts so ordinary-user empty lists show unknown instead of zero. Allow the measured 28 KiB free block with compact dynamic TLS while retaining the total-heap guard and ordinary-build thresholds.
+
 - Show cached favorite and active station counts below the contact history frame. Stagger bounded background counts, refresh each category every 60 seconds, prioritize interactive requests and pause during setup/switching. Show placeholders for unknown or stale results; quarantine timed-out replies without repeatedly reconnecting unsupported endpoints.
 
 - Set the default startup conversation volume to 50%.

@@ -795,6 +795,7 @@ static void create_monitor(void)
     online_label = label(screen, 116, AIR_TOP, 112, &lv_font_montserrat_14, ORANGE, "--");
     lv_obj_set_style_text_align(online_label, LV_TEXT_ALIGN_RIGHT, 0);
     center_ink(online_label, AIR_TOP, AIR_HEIGHT, 'H');
+    lv_obj_add_flag(online_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(online_label, draw_online_icon, LV_EVENT_DRAW_MAIN_END, NULL);
     for (unsigned i = 0; i < FMO_HISTORY_COUNT; ++i) {
         int top = QSO_ROWS_TOP + QSO_ROW_HEIGHT * i;
@@ -892,9 +893,11 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
                  "数据清理失败 请重试" : !strcmp(error, "SETUP SAVE FAILED") ?
                  "配网设置保存失败" : "网络启动失败 请重试";
     }
-    lv_obj_set_width(air_label, error[0] ? 216 : 100);
-    if (error[0]) lv_obj_add_flag(online_label, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_remove_flag(online_label, LV_OBJ_FLAG_HIDDEN);
+    bool online_visible = !setup && !error[0] && s->wifi_connected && s->control_connected &&
+        s->channel_valid && s->online_count_valid;
+    lv_obj_set_width(air_label, online_visible ? 100 : 216);
+    if (online_visible) lv_obj_remove_flag(online_label, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(online_label, LV_OBJ_FLAG_HIDDEN);
     if (text(air_label, air)) center_ink(air_label, AIR_TOP, AIR_HEIGHT, 'H');
     color(air_label, speaking || setup ? ORANGE : MUTED);
     bool call_changed = text(callsign_label, call);
@@ -972,7 +975,7 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         callsign_setup = setup;
     }
     char summary[80], pinned[16] = "--", active[16] = "--";
-    if (!setup && !error[0] && s->wifi_connected && s->control_connected) {
+    if (!setup && !error[0] && s->wifi_connected) {
         if (s->pinned_count_valid) snprintf(pinned, sizeof(pinned), "%lu", (unsigned long)s->pinned_count);
         if (s->active_count_valid) snprintf(active, sizeof(active), "%lu", (unsigned long)s->active_count);
     }
@@ -982,8 +985,7 @@ void fmo_ui_render(const fmo_monitor_state_t *s, const char *error,
         lv_obj_invalidate(monitor_content);
     }
     char online[40];
-    if (!setup && !error[0] && s->wifi_connected && s->control_connected &&
-        s->channel_valid && s->online_count_valid)
+    if (online_visible)
         snprintf(online, sizeof(online), "%lu", (unsigned long)s->online_count);
     else snprintf(online, sizeof(online), "--");
     if (text(online_label, online)) center_ink(online_label, AIR_TOP, AIR_HEIGHT, 'H');

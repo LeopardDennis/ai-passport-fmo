@@ -64,6 +64,7 @@ static fmo_stations_t s_summary;
 static bool s_summary_disabled[2];
 static uint64_t s_summary_due[2], s_summary_updated[2];
 static bool s_online_pending;
+static bool s_online_role_known, s_online_allowed, s_online_role_pending;
 static uint64_t s_online_query_ms, s_online_next_ms, s_online_updated_ms;
 static uint32_t s_online_channel;
 static bool s_position_pending;
@@ -122,10 +123,10 @@ static void post_update(const fmo_update_t *update)
         s_query_pending = false;
         s_position_pending = false;
         s_online_pending = false;
+        s_online_role_known = s_online_allowed = s_online_role_pending = false;
         memset(&s_summary, 0, sizeof(s_summary));
-        s_summary_due[0] = s_summary_disabled[0] ? UINT64_MAX : 0;
-        s_summary_due[1] = s_summary_disabled[1] ? UINT64_MAX : now_ms() + 3000;
-        state->pinned_count_valid = state->active_count_valid = false;
+        s_summary_due[0] = s_summary_disabled[0] ? now_ms() + 60000 : 0;
+        s_summary_due[1] = s_summary_disabled[1] ? now_ms() + 60000 : now_ms() + 3000;
         s_online_next_ms = 0;
         state->online_count_valid = false;
         s_position_next_ms = 0;
@@ -138,6 +139,10 @@ static void post_update(const fmo_update_t *update)
         if (s_query_pending && state->wifi_connected && state->control_connected) {
             if (s_query_revision == s_speaker_revision ||
                 (state->channel_valid && state->channel_uid == update->uid)) {
+                if (state->channel_uid != update->uid) {
+                    s_online_pending = s_online_role_known = s_online_allowed = s_online_role_pending = false;
+                    s_online_next_ms = 0;
+                }
                 fmo_monitor_set_channel(state, update->uid, update->text);
                 state->channel_confirmed_ms = now_ms();
                 fmo_stations_current(&s_snapshot.stations, update->uid);
@@ -270,9 +275,11 @@ static void finish_station_summary(bool valid)
 {
     unsigned index = s_summary.category == FMO_STATION_PINNED ? 0 : 1;
     fmo_monitor_state_t *state = &s_snapshot.state;
-    if (!index) { state->pinned_count_valid = valid; state->pinned_count = s_summary.total; }
-    else { state->active_count_valid = valid; state->active_count = s_summary.total; }
-    s_summary_updated[index] = now_ms();
+    if (valid) {
+        if (!index) { state->pinned_count_valid = true; state->pinned_count = s_summary.total; }
+        else { state->active_count_valid = true; state->active_count = s_summary.total; }
+        s_summary_updated[index] = now_ms();
+    }
     s_summary_due[index] = now_ms() + 60000;
     unsigned other = 1 - index;
     if (s_summary_due[other] < now_ms() + 3000) s_summary_due[other] = now_ms() + 3000;
@@ -342,6 +349,30 @@ static void parse_local_position(const cJSON *data, bool malformed)
     xSemaphoreGive(s_state_lock);
 }
 
+/* The management user-list endpoint returns an empty list for role 0.
+ * Verify access on each channel before interpreting its total as a count. */
+static void parse_online_role(const cJSON *root)
+{
+    const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+    const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    const cJSON *role = cJSON_GetObjectItemCaseSensitive(data, "role");
+    bool allowed = cJSON_IsNumber(code) && code->valuedouble == 0 &&
+        cJSON_IsNumber(role) && (role->valuedouble == 1 || role->valuedouble == 2);
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    fmo_monitor_state_t *state = &s_snapshot.state;
+    if (s_online_pending && s_online_role_pending && now_ms() - s_online_query_ms < 5000 &&
+        state->wifi_connected && state->control_connected && state->channel_valid &&
+        state->channel_uid == s_online_channel && !s_snapshot.stations.audio_paused &&
+        !atomic_load(&s_setup_requested) && !atomic_load(&s_setup_active)) {
+        s_online_pending = s_online_role_pending = false;
+        s_online_role_known = true; s_online_allowed = allowed;
+        s_online_next_ms = allowed ? 0 : UINT64_MAX;
+        state->online_count_valid = false;
+        xQueueOverwrite(s_update_queue, &s_snapshot);
+    }
+    xSemaphoreGive(s_state_lock);
+}
+
 /* Optional server statistics have independent reply ownership. */
 static void parse_online_count(const cJSON *root, bool malformed)
 {
@@ -353,7 +384,8 @@ static void parse_online_count(const cJSON *root, bool malformed)
         total->valuedouble == (uint32_t)total->valuedouble;
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
     fmo_monitor_state_t *state = &s_snapshot.state;
-    if (s_online_pending && now_ms() - s_online_query_ms < 5000 &&
+    if (s_online_pending && !s_online_role_pending && s_online_role_known && s_online_allowed &&
+        now_ms() - s_online_query_ms < 5000 &&
         state->wifi_connected && state->control_connected && state->channel_valid &&
         state->channel_uid == s_online_channel && !s_snapshot.stations.audio_paused &&
         !atomic_load(&s_setup_requested) && !atomic_load(&s_setup_active)) {
@@ -382,6 +414,11 @@ static void parse_fmo_message(fmo_socket_kind_t kind, const char *payload)
     if (!cJSON_IsString(type) || !cJSON_IsString(sub_type)) {
         cJSON_Delete(root);
         return;
+    }
+    if (kind == FMO_SOCKET_CONTROL && !strcmp(type->valuestring, "config") &&
+        !strcmp(sub_type->valuestring, "getRoleResponse")) {
+        if (!fmo_text_json_has_nul(payload)) parse_online_role(root);
+        cJSON_Delete(root); return;
     }
     if (!strcmp(type->valuestring, "serverUsers")) {
         if (kind == FMO_SOCKET_CONTROL && !strcmp(sub_type->valuestring, "getListPageResponse"))
@@ -626,11 +663,16 @@ static void request_online_count(void)
         xSemaphoreGive(s_state_lock); return;
     }
     s_online_pending = true; s_online_query_ms = now; s_online_channel = state->channel_uid;
+    s_online_role_pending = !s_online_role_known;
+    bool role_query = s_online_role_pending;
     xSemaphoreGive(s_state_lock);
-    static const char request[] = "{\"type\":\"serverUsers\",\"subType\":\"getListPage\",\"data\":{\"page\":0,\"pageSize\":1}}";
+    static const char role_request[] = "{\"type\":\"config\",\"subType\":\"getRole\",\"data\":{}}";
+    static const char count_request[] = "{\"type\":\"serverUsers\",\"subType\":\"getListPage\",\"data\":{\"page\":0,\"pageSize\":1}}";
+    const char *request = role_query ? role_request : count_request;
+    int length = (int)strlen(request);
     int sent = esp_websocket_client_send_text(s_control_socket.client, request,
-        sizeof(request) - 1, pdMS_TO_TICKS(FMO_LINK_IO_TIMEOUT_MS));
-    if (sent != sizeof(request) - 1) {
+        length, pdMS_TO_TICKS(FMO_LINK_IO_TIMEOUT_MS));
+    if (sent != length) {
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
         s_online_pending = false; s_online_next_ms = UINT64_MAX; state->online_count_valid = false;
         xQueueOverwrite(s_update_queue, &s_snapshot);
@@ -680,6 +722,7 @@ static bool request_station_summary(void)
     if (s_summary.request == FMO_STATION_NONE) {
         unsigned index = s_summary_due[0] <= s_summary_due[1] ? 0 : 1;
         if (now < s_summary_due[index]) { xSemaphoreGive(s_state_lock); return false; }
+        s_summary_disabled[index] = false;
         memset(&s_summary, 0, sizeof(s_summary));
         fmo_stations_load(&s_summary, index ? FMO_STATION_ACTIVE : FMO_STATION_PINNED, 0, now);
         fmo_stations_begin_count(&s_summary, now);

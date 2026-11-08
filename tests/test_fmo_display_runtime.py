@@ -116,12 +116,7 @@ int main(void) {
     assert(!setups && s_controls.view==FMO_VIEW_NETWORK);
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(setups==1);
     fmo_controls_observe_setup(&s_controls, true);
-    assert(s_controls.view==FMO_VIEW_NETWORK && s_controls.selection==0);
-    key(BSP_BTN_DOWN, BSP_BTN_PRESS); key(BSP_BTN_DOWN, BSP_BTN_CLICK);
-    assert(s_controls.selection==1);
-    key(BSP_BTN_UP, BSP_BTN_PRESS); key(BSP_BTN_UP, BSP_BTN_CLICK);
-    assert(s_controls.selection==0);
-    key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.view==FMO_VIEW_SETUP);
+    assert(s_controls.view==FMO_VIEW_SETUP && !s_controls.setup_info);
     key(BSP_BTN_OK, BSP_BTN_CLICK); assert(s_controls.setup_info);
     key(BSP_BTN_OK, BSP_BTN_LONG); assert(cancels==1);
     fmo_controls_observe_setup(&s_controls, false);

@@ -3,8 +3,30 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+/* Existing menu cases explicitly return from the new automatic QR page. */
+static void observe_setup_menu(fmo_controls_t *c, bool active)
+{
+    bool rising = active && !c->hotspot_active;
+    fmo_controls_observe_setup(c, active);
+    if (rising) {
+        assert(c->view == FMO_VIEW_SETUP && !c->setup_info);
+        assert(fmo_controls_key(c, FMO_KEY_BACK) == FMO_ACTION_CANCEL);
+        assert(c->view == FMO_VIEW_NETWORK);
+    }
+}
 int main(void)
 {
+    fmo_controls_t first = {0};
+    fmo_controls_observe_setup(&first,true);
+    assert(first.view==FMO_VIEW_SETUP && !first.setup_info);
+    fmo_controls_key(&first,FMO_KEY_OK);assert(first.setup_info);
+    fmo_controls_observe_setup(&first,true);assert(first.setup_info);
+    fmo_controls_key(&first,FMO_KEY_BACK);assert(first.view==FMO_VIEW_NETWORK);
+    fmo_controls_observe_setup(&first,true);assert(first.view==FMO_VIEW_NETWORK);
+    fmo_controls_observe_setup(&first,false);
+    assert(fmo_controls_key(&first,FMO_KEY_OK)==FMO_ACTION_SETUP);
+    fmo_controls_observe_setup(&first,true);assert(first.view==FMO_VIEW_SETUP && !first.setup_info);
+    fmo_controls_observe_setup(&first,false);assert(first.view==FMO_VIEW_MONITOR);
     fmo_controls_t c = {.audio_enabled=true,.volume=50};
     assert(fmo_controls_key(&c, FMO_KEY_UP) == FMO_ACTION_VOLUME);
     assert(c.volume==60);
@@ -73,12 +95,12 @@ int main(void)
     }
     fmo_controls_key(&c,FMO_KEY_UP);assert(c.selection==4);
     assert(fmo_controls_key(&c,FMO_KEY_OK)==FMO_ACTION_RETRY && c.view==FMO_VIEW_MONITOR);
-    fmo_controls_observe_setup(&c, true);
+    observe_setup_menu(&c, true);
     assert(c.view == FMO_VIEW_NETWORK && c.selection == 0 && !c.setup_info);
     for (unsigned i = 0; i < 3; ++i) {
         fmo_controls_key(&c, FMO_KEY_DOWN);
         assert(c.selection == (i + 1) % 3);
-        fmo_controls_observe_setup(&c, true); // Repeated snapshots must not reset selection.
+        observe_setup_menu(&c, true); // Repeated snapshots must not reset selection.
         assert(c.view == FMO_VIEW_NETWORK && c.selection == (i + 1) % 3);
     }
     assert(fmo_controls_key(&c, FMO_KEY_OK) == FMO_ACTION_NONE && c.view == FMO_VIEW_SETUP);
@@ -91,27 +113,27 @@ int main(void)
     assert(c.view == FMO_VIEW_NETWORK);
     fmo_controls_key(&c, FMO_KEY_OK);
     assert(fmo_controls_key(&c, FMO_KEY_BACK) == FMO_ACTION_CANCEL);
-    fmo_controls_observe_setup(&c, true); assert(c.view == FMO_VIEW_NETWORK);
-    fmo_controls_observe_setup(&c, false); assert(c.view == FMO_VIEW_NETWORK);
+    observe_setup_menu(&c, true); assert(c.view == FMO_VIEW_NETWORK);
+    observe_setup_menu(&c, false); assert(c.view == FMO_VIEW_NETWORK);
     fmo_controls_key(&c, FMO_KEY_BACK); assert(c.view == FMO_VIEW_MONITOR);
-    fmo_controls_observe_setup(&c, true);
+    observe_setup_menu(&c, true);
     fmo_controls_key(&c, FMO_KEY_DOWN);
     assert(fmo_controls_key(&c, FMO_KEY_OK) == FMO_ACTION_NONE && c.view == FMO_VIEW_WIFI);
     assert(fmo_controls_key(&c, FMO_KEY_BACK) == FMO_ACTION_NONE && c.view == FMO_VIEW_NETWORK && c.selection==1);
     fmo_controls_key(&c, FMO_KEY_OK);
     assert(fmo_controls_key(&c, FMO_KEY_OK) == FMO_ACTION_RETRY && c.view == FMO_VIEW_MONITOR);
-    fmo_controls_observe_setup(&c, false);
-    fmo_controls_observe_setup(&c, true);
+    observe_setup_menu(&c, false);
+    observe_setup_menu(&c, true);
     fmo_controls_key(&c, FMO_KEY_UP);
     assert(c.selection == 2);
     assert(fmo_controls_key(&c, FMO_KEY_OK) == FMO_ACTION_CANCEL && c.view == FMO_VIEW_MONITOR);
-    fmo_controls_observe_setup(&c, false);
-    fmo_controls_observe_setup(&c, true);
+    observe_setup_menu(&c, false);
+    observe_setup_menu(&c, true);
     assert(fmo_controls_key(&c, FMO_KEY_BACK) == FMO_ACTION_CANCEL && c.view == FMO_VIEW_MONITOR);
-    fmo_controls_observe_setup(&c, false);
-    fmo_controls_observe_setup(&c, true);
+    observe_setup_menu(&c, false);
+    observe_setup_menu(&c, true);
     fmo_controls_key(&c, FMO_KEY_OK);
-    fmo_controls_observe_setup(&c, false);
+    observe_setup_menu(&c, false);
     assert(c.view == FMO_VIEW_MONITOR);
     c.view=FMO_VIEW_WIFI;c.selection=4;
     fmo_wifi_list_t changed={.count=2,.names={"lab","home"}};

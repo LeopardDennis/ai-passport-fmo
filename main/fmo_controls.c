@@ -16,8 +16,8 @@ void fmo_controls_observe_wifi(fmo_controls_t *c, const fmo_wifi_list_t *wifi)
 void fmo_controls_observe_setup(fmo_controls_t *c, bool active)
 {
     if (active && !c->hotspot_active) {
-        // Make all network actions reachable before entering the QR/info view.
-        c->view = FMO_VIEW_NETWORK;
+        // The hotspot is ready: show its QR immediately, once per activation.
+        c->view = FMO_VIEW_SETUP;
         c->selection = 0;
         c->setup_info = false;
     } else if (!active && c->hotspot_active && c->view == FMO_VIEW_SETUP) {
